@@ -5,16 +5,17 @@ This module defines the benchmark matrix: which methods to test, with what
 parameters, and how they map to paper figures.
 
 Each entry in METHODS specifies:
-  - tool: "sux", "burr", "burr-vl", "csf", or "comp-vfunc"
-  - How to build the structure and how to query it
-  - Default size ranges and special flags
+  - tool: "sux" and "burr" (filter), "burr-vl", "csf", and
+    "comp-vfunc" (compressed functions)
 
-Bit widths come in two families:
+  - How to build the structure and how to query it - Default size
+    ranges and special flags
+
+Bit widths for filters come in two families:
   - "even" (8, 16, 32): power-of-2 widths, byte-aligned storage
-  - "odd" (9, 17, 33): non-power-of-2, needs unaligned access
+  - "odd" (9, 17, 33): non-power-of-2
 
-To add a new method (e.g., MMPHF, compressed functions), add an entry
-to METHODS following the existing pattern.
+To add a new method add an entry to METHODS following the existing pattern.
 """
 
 # --- Bit-width families ---
@@ -36,6 +37,7 @@ QUERY_KEYS = 100_000_000
 # available CPUs — using all cores causes problems on architectures
 # with heterogeneous cores (P/E cores) or heavy hyperthreading.
 import os
+
 DEFAULT_THREADS = max(1, os.cpu_count() // 2)
 
 # Default number of parallel query instances for par-bench.
@@ -45,12 +47,6 @@ DEFAULT_PAR_JOBS = DEFAULT_THREADS
 # threshold compression, interleaved solution storage.
 BURR_VL_FLAGS = ["-L", "128", "-d", "2", "-2", "-I"]
 
-# Cargo features required for sux-rs binaries.
-#   cli      – enables the CLI binaries (vfilter, vfunc, …)
-#   mwhc     – enables the Mwhc3 shard/edge type
-#   rayon    – parallel construction via Rayon
-#   epserde  – serialization support (ε-serde)
-#   deko     – decompression support for compressed input
 SUX_FEATURES = "cli,mwhc,rayon,epserde,deko"
 
 # Cargo profile used for benchmark builds.
@@ -73,7 +69,6 @@ METHODS = {
     # --shard-edge selects the hypergraph construction variant.
     #
     # The shard_edge values use clap's kebab-case convention.
-
     "Fuse3NoShards64": {
         "tool": "sux",
         "label": "Fuse(64)",
@@ -82,11 +77,10 @@ METHODS = {
         "shard_edge": "fuse3-no-shards64",
         "build_bin": "vfilter",
         "bench_bin": "bench_vfilter",
-        "build_threads": None,     # no sharding ⇒ single-threaded build
-        "max_log2": 31,            # 64-bit sig space limits max size
+        "build_threads": None,  # no sharding ⇒ single-threaded build
+        "max_log2": 31,  # 64-bit sig space limits max size
         "build_extra": ["--seed", "1"],
     },
-
     "Fuse3NoShards128": {
         "tool": "sux",
         "label": "Fuse(128)",
@@ -100,7 +94,6 @@ METHODS = {
         # --low-mem switches to a slower but leaner variant.
         "low_mem_threshold": 32,
     },
-
     "FuseLge3Shards": {
         "tool": "sux",
         "label": "VFilter(Fuse+LGE,par)",
@@ -112,7 +105,6 @@ METHODS = {
         "build_threads": DEFAULT_THREADS,
         "max_log2": 33,
     },
-
     "FuseLge3Shards-seq": {
         "tool": "sux",
         "label": "VFilter(Fuse+LGE,seq)",
@@ -120,11 +112,10 @@ METHODS = {
         # Used only for construction-time comparison (no query benchmark).
         "shard_edge": "fuse-lge3-shards",
         "build_bin": "vfilter",
-        "bench_bin": None,         # no queries
+        "bench_bin": None,  # no queries
         "build_threads": 1,
         "max_log2": 33,
     },
-
     "Mwhc3": {
         "tool": "sux",
         "label": "VFilter(MWHC,par)",
@@ -134,10 +125,9 @@ METHODS = {
         "bench_bin": "bench_vfilter",
         "build_threads": DEFAULT_THREADS,
         "max_log2": 33,
-        # MWHC needs a slightly larger epsilon for solvability.
+        # MWHC uses a slightly larger epsilon to shard finely
         "build_extra": ["--eps", "0.01"],
     },
-
     # -----------------------------------------------------------------
     # BuRR (Bumped Ribbon Retrieval) methods
     # -----------------------------------------------------------------
@@ -153,7 +143,6 @@ METHODS = {
     #
     # Build:  bench<bits> -t <threads> -L 64 -2 -I -n <n>
     # Query:  bench<bits> -t 1         -L 64 -2 -I -n <n> -r <file>
-
     "BuRR-par": {
         "tool": "burr",
         "label": "BuRR (par)",
@@ -162,7 +151,6 @@ METHODS = {
         "burr_threads": DEFAULT_THREADS,
         "max_log2": 32,
     },
-
     "BuRR-seq": {
         "tool": "burr",
         "label": "BuRR (seq)",
@@ -171,7 +159,6 @@ METHODS = {
         "burr_threads": 1,
         "max_log2": 32,
     },
-
     # -----------------------------------------------------------------
     # BuRR-VL (Variable-Length Ribbon retrieval)
     # -----------------------------------------------------------------
@@ -180,9 +167,10 @@ METHODS = {
     # two-bit threshold, interleaved, uint64_t keys.
     # Takes --geometric / --zipf K / --uniform K for value distribution.
     #
+    # Note: at the time of this writing, gcc will miscompile BuRR-VL with -O3.
+    #
     # Build:  ribbon_vlr -L 128 -d 2 -2 -I -n <n> --geometric -Q -w <file>
     # Query:  ribbon_vlr -L 128 -d 2 -2 -I -n <n> -r <file>
-
     "BuRR-VL-Geo": {
         "tool": "burr-vl",
         "label": "BuRR-VL(geo)",
@@ -190,7 +178,6 @@ METHODS = {
         "distribution": ["--geometric"],
         "max_log2": 32,
     },
-
     "BuRR-VL-Zipf": {
         "tool": "burr-vl",
         "label": "BuRR-VL(zipf)",
@@ -198,7 +185,6 @@ METHODS = {
         "distribution": ["--zipf", "2000"],
         "max_log2": 32,
     },
-
     "BuRR-VL-Uni256": {
         "tool": "burr-vl",
         "label": "BuRR-VL(uni256)",
@@ -206,7 +192,6 @@ METHODS = {
         "distribution": ["--uniform", "256"],
         "max_log2": 32,
     },
-
     # -----------------------------------------------------------------
     # CSF (Compressed Static Functions via BuRR-VL)
     # -----------------------------------------------------------------
@@ -216,7 +201,6 @@ METHODS = {
     #
     # Build:  bench_csf -n <n> --geometric --coder fano -Q -w <file>
     # Query:  bench_csf -n <n> --coder fano -r <file>
-
     "CSF-Fano-Geo": {
         "tool": "csf",
         "label": "CSF(Fano,geo)",
@@ -224,7 +208,6 @@ METHODS = {
         "coder": "fano",
         "max_log2": 32,
     },
-
     "CSF-Fano-Zipf": {
         "tool": "csf",
         "label": "CSF(Fano,zipf)",
@@ -232,7 +215,6 @@ METHODS = {
         "coder": "fano",
         "max_log2": 32,
     },
-
     "CSF-Fano-Uni256": {
         "tool": "csf",
         "label": "CSF(Fano,uni256)",
@@ -240,18 +222,16 @@ METHODS = {
         "coder": "fano",
         "max_log2": 32,
     },
-
     # -----------------------------------------------------------------
     # sux-rs CompVFunc (compressed static functions)
     # -----------------------------------------------------------------
     #
-    # Two-step like VFilter: build with comp_vfunc, query with
+    # Build with comp_vfunc, query with
     # bench_comp_vfunc.  Bits-agnostic (bits/key is a result metric).
     # Uses bits=0 sentinel.
     #
     # Build:  comp_vfunc -n <n> --geometric --shard-edge fuse3-shards <outfile>
     # Query:  bench_comp_vfunc <n> <outfile> --edge fuse3-shards
-
     "CompVFunc-Geo": {
         "tool": "comp-vfunc",
         "label": "CompVFunc(geo)",
@@ -260,7 +240,6 @@ METHODS = {
         "build_threads": DEFAULT_THREADS,
         "max_log2": 33,
     },
-
     "CompVFunc-Zipf": {
         "tool": "comp-vfunc",
         "label": "CompVFunc(zipf)",
@@ -269,7 +248,6 @@ METHODS = {
         "build_threads": DEFAULT_THREADS,
         "max_log2": 33,
     },
-
     "CompVFunc-Uni256": {
         "tool": "comp-vfunc",
         "label": "CompVFunc(uni256)",
@@ -296,9 +274,13 @@ FIGURES = {
     "construction": {
         "title": "Construction ({bits} bits)",
         "methods": [
-            "Fuse3NoShards64", "Fuse3NoShards128",
-            "FuseLge3Shards", "FuseLge3Shards-seq",
-            "Mwhc3", "BuRR-par", "BuRR-seq",
+            "Fuse3NoShards64",
+            "Fuse3NoShards128",
+            "FuseLge3Shards",
+            "FuseLge3Shards-seq",
+            "Mwhc3",
+            "BuRR-par",
+            "BuRR-seq",
         ],
         "column": "constr_ns",
         "ylabel": "ns/key",
@@ -306,8 +288,11 @@ FIGURES = {
     "queries": {
         "title": "Queries ({bits} bits)",
         "methods": [
-            "Fuse3NoShards64", "Fuse3NoShards128",
-            "FuseLge3Shards", "Mwhc3", "BuRR-par",
+            "Fuse3NoShards64",
+            "Fuse3NoShards128",
+            "FuseLge3Shards",
+            "Mwhc3",
+            "BuRR-par",
         ],
         "column": "query_min",
         "ylabel": "ns/key",
@@ -315,8 +300,11 @@ FIGURES = {
     "parqueries": {
         "title": "Parallel Queries ({bits} bits)",
         "methods": [
-            "Fuse3NoShards64", "Fuse3NoShards128",
-            "FuseLge3Shards", "Mwhc3", "BuRR-par",
+            "Fuse3NoShards64",
+            "Fuse3NoShards128",
+            "FuseLge3Shards",
+            "Mwhc3",
+            "BuRR-par",
         ],
         "column": "parbench_max",
         "ylabel": "ns/key",
@@ -329,10 +317,8 @@ FIGURES = {
         "column": "constr_ns",
         "ylabel": "ns/key",
     },
-
     # --- Compressed / variable-length figures ---
     # These are bits-agnostic (auto-detected by the plot code).
-
     "csf-construction-geo": {
         "title": "CSF Construction (geometric)",
         "methods": ["BuRR-VL-Geo", "CSF-Fano-Geo", "CompVFunc-Geo"],
