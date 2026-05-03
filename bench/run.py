@@ -172,7 +172,9 @@ def ensure_sux_built(sux_dir, need_comp_vfunc=False):
     examples = sux / "target" / "release" / "examples"
     needed = [
         sux / "target" / "release" / "vfilter",
+        sux / "target" / "release" / "vfunc",
         examples / "bench_vfilter",
+        examples / "bench_vfunc",
         sux / "target" / "release" / "comp_vfunc",
         examples / "bench_comp_vfunc",
         examples / "bench_phast",
@@ -186,7 +188,9 @@ def ensure_sux_built(sux_dir, need_comp_vfunc=False):
         "--profile", SUX_PROFILE,
         "--features", SUX_FEATURES,
         "--bin", "vfilter",
+        "--bin", "vfunc",
         "--example", "bench_vfilter",
+        "--example", "bench_vfunc",
         "--bin", "comp_vfunc",
         "--example", "bench_comp_vfunc",
         "--example", "bench_phast",
@@ -262,9 +266,10 @@ def sux_build_cmd(cfg, n, bits, outfile, args):
     cmd = [str(sux / "target" / "release" / cfg["build_bin"])]
     cmd += ["-n", str(n)]
     cmd += ["--shard-edge", cfg["shard_edge"]]
-    cmd += ["--bits", str(bits)]
-    if bits not in EVEN_BITS:
-        cmd += ["--unaligned"]
+    if bits > 0:
+        cmd += ["--bits", str(bits)]
+        if bits not in EVEN_BITS:
+            cmd += ["--unaligned"]
 
     # Per-method extras: --eps, --seed, etc.
     cmd += cfg.get("build_extra", [])
@@ -299,8 +304,9 @@ def sux_query_cmd(cfg, n, bits, infile, args):
     cmd += [str(QUERY_KEYS)]             # number of query operations
     cmd += [str(infile)]                 # serialized structure
     cmd += ["--edge", cfg["shard_edge"]]
-    cmd += ["--bits", str(bits)]
-    if bits not in EVEN_BITS:
+    if bits > 0:
+        cmd += ["--bits", str(bits)]
+    if bits > 0 and bits not in EVEN_BITS:
         cmd += ["--unaligned"]
     return cmd
 
@@ -495,7 +501,7 @@ def cmd_bench(args):
             continue
 
         max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
-        bits_agnostic = cfg["tool"] in ("csf", "comp-vfunc", "phast")
+        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in ("csf", "comp-vfunc", "phast"))
         method_bits = [0] if bits_agnostic else bits_list
 
         for bits in method_bits:
@@ -552,7 +558,8 @@ def _bench_burr(cfg, method_name, n, bits, log2_n, rdir, args):
     cmd = burr_bench_cmd(cfg, n, bits, args, serialize_to=outfile)
     cmd += ["-Q"]
 
-    print(f"  bench {method_name} n=2^{log2_n} bits={bits}")
+    bits_str = f" bits={bits}" if bits > 0 else ""
+    print(f"  bench {method_name} n=2^{log2_n}{bits_str}")
     result = run_cmd(cmd, dry_run=args.dry_run)
 
     # --- Query (deserialize, single-threaded, pinned) ---
@@ -702,7 +709,8 @@ def _bench_sux(cfg, method_name, n, bits, log2_n, rdir, args):
 
     # --- Build (unpinned) ---
     cmd = sux_build_cmd(cfg, n, bits, outfile, args)
-    print(f"  bench {method_name} n=2^{log2_n} bits={bits}")
+    bits_str = f" bits={bits}" if bits > 0 else ""
+    print(f"  bench {method_name} n=2^{log2_n}{bits_str}")
     result = run_cmd(cmd, dry_run=args.dry_run)
 
     # --- Query (pinned) ---
@@ -913,7 +921,7 @@ def cmd_report(args):
 
         max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
         tool_for_parse = _parse_tool(cfg["tool"])
-        bits_agnostic = cfg["tool"] in ("csf", "comp-vfunc", "phast")
+        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in ("csf", "comp-vfunc", "phast"))
         method_bits = [0] if bits_agnostic else bits_list
 
         entropy = distribution_entropy(cfg.get("distribution"))
@@ -1018,7 +1026,7 @@ def _plot_one(figure_name, args, plt):
     col = fig_cfg["column"]
 
     all_agnostic = all(
-        METHODS[m]["tool"] in ("csf", "comp-vfunc")
+        METHODS[m].get("bits_agnostic", METHODS[m]["tool"] in ("csf", "comp-vfunc", "phast"))
         for m in fig_cfg["methods"] if m in METHODS
     )
     if all_agnostic:
@@ -1130,7 +1138,7 @@ def cmd_status(args):
         done_bench, done_pq = 0, 0
         total = 0
         tool_for_parse = _parse_tool(cfg["tool"])
-        bits_agnostic = cfg["tool"] in ("csf", "comp-vfunc", "phast")
+        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in ("csf", "comp-vfunc", "phast"))
         method_bits = [0] if bits_agnostic else bits_list
 
         for bits in method_bits:

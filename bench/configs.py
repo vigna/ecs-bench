@@ -222,6 +222,26 @@ METHODS = {
         "max_log2": 33,
     },
     # -----------------------------------------------------------------
+    # sux-rs VFunc (list index functions / minimal perfect hash)
+    # -----------------------------------------------------------------
+    #
+    # Same two-step pattern as VFilter:
+    #   Build: vfunc -n <n> --shard-edge <E> [--threads T] <outfile>
+    #   Query: bench_vfunc <query_keys> <outfile> --edge <E>
+    #
+    # VFunc maps keys to their rank [0..n), so bits/key is a result
+    # metric (bits-agnostic).
+    "VFunc": {
+        "tool": "sux",
+        "label": "VFunc(Fuse+LGE)",
+        "shard_edge": "fuse-lge3-shards",
+        "build_bin": "vfunc",
+        "bench_bin": "bench_vfunc",
+        "bits_agnostic": True,
+        "build_threads": DEFAULT_THREADS,
+        "max_log2": 33,
+    },
+    # -----------------------------------------------------------------
     # PHast+ (minimal perfect hash + array)
     # -----------------------------------------------------------------
     #
@@ -252,8 +272,10 @@ METHODS = {
 # For "even" figures use bits in EVEN_BITS; for "odd" use ODD_BITS.
 
 FIGURES = {
-    "construction": {
-        "title": "Construction ({bits} bits)",
+    # --- Filters: per bit width ---
+    # One PDF per bit width: filter-build-8.pdf, filter-query-32.pdf, etc.
+    "filter-build": {
+        "title": "Filter Construction ({bits} bits)",
         "methods": [
             "Fuse3NoShards64",
             "Fuse3NoShards128",
@@ -266,8 +288,8 @@ FIGURES = {
         "column": "constr_ns",
         "ylabel": "ns/key",
     },
-    "queries": {
-        "title": "Queries ({bits} bits)",
+    "filter-query": {
+        "title": "Filter Queries ({bits} bits)",
         "methods": [
             "Fuse3NoShards64",
             "Fuse3NoShards128",
@@ -278,8 +300,8 @@ FIGURES = {
         "column": "query_min",
         "ylabel": "ns/key",
     },
-    "parqueries": {
-        "title": "Parallel Queries ({bits} bits)",
+    "filter-parquery": {
+        "title": "Filter Parallel Queries ({bits} bits)",
         "methods": [
             "Fuse3NoShards64",
             "Fuse3NoShards128",
@@ -290,47 +312,37 @@ FIGURES = {
         "column": "parbench_max",
         "ylabel": "ns/key",
     },
-    "comp": {
-        "title": "Construction Comparison ({bits} bits)",
-        "methods": ["FuseLge3Shards-seq", "Fuse3NoShards128", "Phast"],
+    # --- Compressed static functions: all distributions on one plot ---
+    # Bits-agnostic (auto-detected): comp-build.pdf, comp-query.pdf.
+    "comp-build": {
+        "title": "Compressed Function Construction",
+        "methods": [
+            "CSF-Geo", "CSF-Zipf", "CSF-Uni256",
+            "CompVFunc-Geo", "CompVFunc-Zipf", "CompVFunc-Uni256",
+        ],
         "column": "constr_ns",
         "ylabel": "ns/key",
     },
-    # --- Compressed / variable-length figures ---
-    # These are bits-agnostic (auto-detected by the plot code).
-    "csf-construction-geo": {
-        "title": "CSF Construction (geometric)",
-        "methods": ["CSF-Geo", "CompVFunc-Geo"],
-        "column": "constr_ns",
-        "ylabel": "ns/key",
-    },
-    "csf-construction-zipf": {
-        "title": "CSF Construction (zipf 2k)",
-        "methods": ["CSF-Zipf", "CompVFunc-Zipf"],
-        "column": "constr_ns",
-        "ylabel": "ns/key",
-    },
-    "csf-construction-uni": {
-        "title": "CSF Construction (uniform 256)",
-        "methods": ["CSF-Uni256", "CompVFunc-Uni256"],
-        "column": "constr_ns",
-        "ylabel": "ns/key",
-    },
-    "csf-queries-geo": {
-        "title": "CSF Queries (geometric)",
-        "methods": ["CSF-Geo", "CompVFunc-Geo"],
+    "comp-query": {
+        "title": "Compressed Function Queries",
+        "methods": [
+            "CSF-Geo", "CSF-Zipf", "CSF-Uni256",
+            "CompVFunc-Geo", "CompVFunc-Zipf", "CompVFunc-Uni256",
+        ],
         "column": "query_min",
         "ylabel": "ns/key",
     },
-    "csf-queries-zipf": {
-        "title": "CSF Queries (zipf 2k)",
-        "methods": ["CSF-Zipf", "CompVFunc-Zipf"],
-        "column": "query_min",
+    # --- PHast+ comparison: no bit width suffix ---
+    # Bits-agnostic: pthash-build.pdf, pthash-query.pdf.
+    "pthash-build": {
+        "title": "PHast+ vs VFunc Construction",
+        "methods": ["Phast", "VFunc"],
+        "column": "constr_ns",
         "ylabel": "ns/key",
     },
-    "csf-queries-uni": {
-        "title": "CSF Queries (uniform 256)",
-        "methods": ["CSF-Uni256", "CompVFunc-Uni256"],
+    "pthash-query": {
+        "title": "PHast+ vs VFunc Queries",
+        "methods": ["Phast", "VFunc"],
         "column": "query_min",
         "ylabel": "ns/key",
     },
