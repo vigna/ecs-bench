@@ -11,17 +11,17 @@ without losing partial progress.
 Usage examples:
 
     # Smoke test: one method, 8 bits, small sizes
-    python bench/run.py bench --method FuseLge3Shards-par --bits 8 --max-log2 22
+    python bench/run.py bench --method FuseLge3Shards --bits 8 --max-log2 22
 
     # Full run with CPU pinning
     python bench/run.py bench --method all --bits all \\
         --pin "chrt -f 99 taskset -c 2"
 
     # Report to stdout
-    python bench/run.py report --method FuseLge3Shards-par --bits 8
+    python bench/run.py report --method FuseLge3Shards --bits 8
 
     # Parallel query benchmark (96 instances via GNU parallel)
-    python bench/run.py par-bench --method FuseLge3Shards-par --bits 8 \\
+    python bench/run.py par-bench --method FuseLge3Shards --bits 8 \\
         --max-log2 30 --jobs 96
 
     # Generate paper figures
@@ -237,7 +237,7 @@ def ensure_burr_built(burr_dir, bits_values):
             continue
         print(f"Building BuRR bench{bits} in {burr}…")
         r = subprocess.run(
-            ["make", "CXX=clang++", f"RIBBON_BITS={bits}", "bench"],
+            ["make", f"RIBBON_BITS={bits}", "bench"],
             cwd=str(burr), capture_output=True, text=True,
         )
         if r.returncode != 0:
@@ -1181,6 +1181,102 @@ def cmd_clean(args):
 
 
 # =====================================================================
+#  Subcommand: table
+# =====================================================================
+
+
+# Table presets.  Each maps a table name to:
+#   - "methods": ordered list of method names (rows)
+#   - "bits_order": ordered list of bit widths (column groups)
+#   - "sizes": list of n values (one table per size)
+#   - "columns": list of (column_key, header) for each half
+
+TABLES = {
+    "filter": {
+        "methods": [
+            ("BuRR", "BuRR"),
+            ("FuseLge3Shards", "VFunc"),
+            ("Mwhc3-seq", "MWHC"),
+            ("Fuse3NoShards64", "Fuse(64)"),
+            ("Fuse3NoShards128", "Fuse(128)"),
+        ],
+        "bits_order": [8, 16, 32, 9, 17, 33],
+        "sizes": [1 << 20, 1 << 30],
+        "constr_col": "constr_ns",
+        "query_col": "query_min",
+    },
+}
+
+
+def cmd_table(args):
+    """Print LaTeX tables for the paper."""
+    if args.table not in TABLES:
+        sys.exit(f"Unknown table: {args.table}\n"
+                 f"Available: {', '.join(TABLES)}")
+
+    tbl = TABLES[args.table]
+
+    for n in tbl["sizes"]:
+        log2_n = n.bit_length() - 1
+        bits_order = tbl["bits_order"]
+        ncols = len(bits_order)
+
+        print(f"% n = 2^{{{log2_n}}}")
+        print(r"\begin{tabular}{l" + "rrr|rrr" + "||" + "rrr|rrr" + "}")
+        print(r"\toprule")
+
+        # Header row 1: construction / queries spanning
+        print(f"& \\multicolumn{{{ncols}}}{{c}}{{Construction (ns/key)}}"
+              f" & \\multicolumn{{{ncols}}}{{c}}{{Queries (ns/key)}} \\\\")
+
+        # Header row 2: bit widths
+        hdr = ""
+        for bits in bits_order:
+            hdr += f" & {bits}"
+        hdr += hdr  # same for queries
+        print(hdr + r" \\")
+        print(r"\midrule")
+
+        # Data rows
+        for method_name, label in tbl["methods"]:
+            if method_name not in METHODS:
+                continue
+            cfg = METHODS[method_name]
+            rdir = Path(args.results_dir) / method_name
+            tool_for_parse = _parse_tool(cfg["tool"])
+
+            row = label
+            # Construction columns
+            for bits in bits_order:
+                bench_err = rdir / f"bench.{n}.{bits}.err"
+                val = ""
+                if bench_err.exists():
+                    bd = parse_build(bench_err.read_text(), tool_for_parse)
+                    v = bd.get("constr_ns")
+                    if v is not None:
+                        val = f"{v:.1f}"
+                row += f" & {val}"
+
+            # Query columns
+            for bits in bits_order:
+                bench_err = rdir / f"bench.{n}.{bits}.err"
+                val = ""
+                if bench_err.exists():
+                    qd = parse_query(bench_err.read_text(), tool_for_parse)
+                    v = qd.get("query_min")
+                    if v is not None:
+                        val = f"{v:.1f}"
+                row += f" & {val}"
+
+            row += r" \\"
+            print(row)
+
+        print(r"\bottomrule")
+        print(r"\end{tabular}")
+        print()
+
+
+# =====================================================================
 #  CLI
 # =====================================================================
 
@@ -1252,6 +1348,12 @@ def make_parser():
     pl.add_argument("--output-dir", default="figs",
                     help="Output directory for PDFs (default: figs)")
 
+    # --- table ---
+    tb = sub.add_parser("table", help="Print LaTeX tables")
+    tb.add_argument("--table", default="filter",
+                    help=f"Table preset (default: filter)")
+    tb.add_argument("--results-dir", default=argparse.SUPPRESS)
+
     # --- status ---
     st = sub.add_parser("status", help="Show completed/pending benchmark runs")
     add_common(st)
@@ -1275,6 +1377,7 @@ def main():
         "par-bench": cmd_par_bench,
         "report": cmd_report,
         "plot": cmd_plot,
+        "table": cmd_table,
         "status": cmd_status,
         "clean": cmd_clean,
     }

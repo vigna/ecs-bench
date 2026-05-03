@@ -47,6 +47,8 @@ def parse_build(text, tool):
         #   "Construction completed … 45.3 ns/key"
         # We match any line with "onstruction" and "ns/key".
         m = re.search(r'onstruction.*?(\d+\.?\d*)\s*ns/key', text)
+        if not m:
+            m = re.search(r'Elapsed:.*?(\d+\.?\d*)\s*ns/key', text)
         if m:
             result["constr_ns"] = float(m.group(1))
     elif tool == "burr":

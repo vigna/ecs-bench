@@ -90,7 +90,7 @@ METHODS = {
         # --low-mem switches to a slower but leaner variant.
         "low_mem_threshold": 32,
     },
-    "FuseLge3Shards-par": {
+    "FuseLge3Shards": {
         "tool": "sux",
         "label": "VFilter(Fuse+LGE,par)",
         # Fuse + lazy Gaussian elimination + ε-cost sharding.
@@ -113,7 +113,7 @@ METHODS = {
         "no_queries": True,
         "max_log2": 33,
     },
-    "Mwhc3-par": {
+    "Mwhc3": {
         "tool": "sux",
         "label": "VFilter(MWHC,par)",
         # Classic MWHC 3-hypergraphs with ε-cost sharding.
@@ -140,7 +140,7 @@ METHODS = {
     #
     # Build:  bench<bits> -t <threads> -L 64 -2 -I -n <n>
     # Query:  bench<bits> -t 1         -L 64 -2 -I -n <n> -r <file>
-    "BuRR-par": {
+    "BuRR": {
         "tool": "burr",
         "label": "BuRR (par)",
         "burr_binary": "bench",
@@ -279,10 +279,10 @@ FIGURES = {
         "methods": [
             "Fuse3NoShards64",
             "Fuse3NoShards128",
-            "FuseLge3Shards-par",
+            "FuseLge3Shards",
             "FuseLge3Shards-seq",
-            "Mwhc3-par",
-            "BuRR-par",
+            "Mwhc3",
+            "BuRR",
             "BuRR-seq",
         ],
         "column": "constr_ns",
@@ -293,9 +293,9 @@ FIGURES = {
         "methods": [
             "Fuse3NoShards64",
             "Fuse3NoShards128",
-            "FuseLge3Shards-par",
-            "Mwhc3-par",
-            "BuRR-par",
+            "FuseLge3Shards",
+            "Mwhc3",
+            "BuRR",
         ],
         "column": "query_min",
         "ylabel": "ns/key",
@@ -305,9 +305,9 @@ FIGURES = {
         "methods": [
             "Fuse3NoShards64",
             "Fuse3NoShards128",
-            "FuseLge3Shards-par",
-            "Mwhc3-par",
-            "BuRR-par",
+            "FuseLge3Shards",
+            "Mwhc3",
+            "BuRR",
         ],
         "column": "parbench_max",
         "ylabel": "ns/key",
