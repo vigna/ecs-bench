@@ -231,11 +231,10 @@ void run_bench(size_t n, const uint64_t *keys, const uint32_t *values,
         LOG1 << "Serialization took " << timer.ElapsedNanos(true) / 1e6 << "ms";
     }
 
-    // Correctness check: verify CSF returns correct values for inserted keys
+    // Correctness check: verify ALL keys return the correct value.
     if (keys != nullptr && values != nullptr) {
         unsigned errors = 0;
-        size_t check = std::min(n, size_t{10000});
-        for (size_t i = 0; i < check; ++i) {
+        for (size_t i = 0; i < n; ++i) {
             uint64_t got = csf.query(keys[i]);
             if (got != values[i]) {
                 if (errors < 10)
@@ -245,14 +244,15 @@ void run_bench(size_t n, const uint64_t *keys, const uint32_t *values,
             }
         }
         if (errors > 0) {
-            LOG1 << "CORRECTNESS FAILED: " << errors << " / " << check << " mismatches";
+            LOG1 << "CORRECTNESS FAILED: " << errors << " / " << n << " mismatches";
+            return;
         }
     }
 
     if (no_queries)
         return;
 
-    const uint64_t N = 100000000;
+    const uint64_t N = 10000000;
     const int REPEATS = 5;
     bool found = false;
 

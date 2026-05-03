@@ -24,6 +24,7 @@ Key lines we look for:
     Same Min/Median/Max/Average format as sux-rs.
 """
 
+import math
 import re
 
 
@@ -93,18 +94,49 @@ def parse_burr_size(text):
     return int(m.group(1)) if m else None
 
 
-def compute_overhead(file_bytes, n, bits):
-    """Compute space overhead of a serialized structure.
+def distribution_entropy(distribution):
+    """Compute the entropy (bits) of a value distribution.
 
-    The information-theoretic minimum is n·bits bits.  The overhead is
-    how much larger the actual file is, as a percentage:
+    Args:
+        distribution: the config's "distribution" list, e.g.
+            ["--geometric"], ["--zipf", "2000"], ["--uniform", "256"].
 
-        overhead = (file_bytes × 8) / (n × bits) × 100 − 100
-
-    A 0% overhead means the file is exactly the information-theoretic
-    minimum.  Typical overheads for the paper's structures are 5–15%.
+    Returns:
+        float (bits per key), or None if unknown.
     """
-    ideal_bits = n * bits
+    if distribution is None:
+        return None
+    flag = distribution[0]
+    if flag == "--geometric":
+        return 2.0
+    elif flag == "--uniform" and len(distribution) > 1:
+        K = int(distribution[1])
+        return math.log2(K) if K > 0 else None
+    elif flag == "--zipf" and len(distribution) > 1:
+        K = int(distribution[1])
+        if K <= 0:
+            return None
+        H = sum(1.0 / (k + 1) for k in range(K))
+        return sum((1.0 / ((k + 1) * H)) * math.log2((k + 1) * H)
+                   for k in range(K))
+    return None
+
+
+def compute_overhead(file_bytes, n, bits_per_key):
+    """Compute space overhead as a percentage above the optimum.
+
+    For filters, the optimum is n * bits (the bit width).
+    For compressed functions, the optimum is n * entropy.
+
+    Args:
+        file_bytes: actual structure size in bytes.
+        n: number of keys.
+        bits_per_key: optimum bits per key (bit width or entropy).
+
+    Returns:
+        float: percentage overhead (0% = exactly optimal).
+    """
+    ideal_bits = n * bits_per_key
     if ideal_bits == 0:
         return 0.0
     return (file_bytes * 8.0 / ideal_bits) * 100.0 - 100.0

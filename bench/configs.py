@@ -5,7 +5,7 @@ This module defines the benchmark matrix: which methods to test, with what
 parameters, and how they map to paper figures.
 
 Each entry in METHODS specifies:
-  - tool: "sux" and "burr" (filter), "burr-vl", "csf", and
+  - tool: "sux" and "burr" (filter), "csf", and
     "comp-vfunc" (compressed functions)
 
   - How to build the structure and how to query it - Default size
@@ -42,10 +42,6 @@ DEFAULT_THREADS = max(1, os.cpu_count() // 2)
 
 # Default number of parallel query instances for par-bench.
 DEFAULT_PAR_JOBS = DEFAULT_THREADS
-
-# BuRR-VL flags matching the LSF paper: L=128, depth 2, two-bit
-# threshold compression, interleaved solution storage.
-BURR_VL_FLAGS = ["-L", "128", "-d", "2", "-2", "-I"]
 
 SUX_FEATURES = "cli,mwhc,rayon,epserde,deko"
 
@@ -94,7 +90,7 @@ METHODS = {
         # --low-mem switches to a slower but leaner variant.
         "low_mem_threshold": 32,
     },
-    "FuseLge3Shards": {
+    "FuseLge3Shards-par": {
         "tool": "sux",
         "label": "VFilter(Fuse+LGE,par)",
         # Fuse + lazy Gaussian elimination + ε-cost sharding.
@@ -112,11 +108,12 @@ METHODS = {
         # Used only for construction-time comparison (no query benchmark).
         "shard_edge": "fuse-lge3-shards",
         "build_bin": "vfilter",
-        "bench_bin": None,  # no queries
+        "bench_bin": "bench_vfilter",
         "build_threads": 1,
+        "no_queries": True,
         "max_log2": 33,
     },
-    "Mwhc3": {
+    "Mwhc3-par": {
         "tool": "sux",
         "label": "VFilter(MWHC,par)",
         # Classic MWHC 3-hypergraphs with ε-cost sharding.
@@ -157,39 +154,7 @@ METHODS = {
         "burr_binary": "bench",
         "burr_flags": ["-L", "64", "-2", "-I"],
         "burr_threads": 1,
-        "max_log2": 32,
-    },
-    # -----------------------------------------------------------------
-    # BuRR-VL (Variable-Length Ribbon retrieval)
-    # -----------------------------------------------------------------
-    #
-    # Plain VLR ribbon matching the LSF paper config: L=128, depth 2,
-    # two-bit threshold, interleaved, uint64_t keys.
-    # Takes --geometric / --zipf K / --uniform K for value distribution.
-    #
-    # Note: at the time of this writing, gcc will miscompile BuRR-VL with -O3.
-    #
-    # Build:  ribbon_vlr -L 128 -d 2 -2 -I -n <n> --geometric -Q -w <file>
-    # Query:  ribbon_vlr -L 128 -d 2 -2 -I -n <n> -r <file>
-    "BuRR-VL-Geo": {
-        "tool": "burr-vl",
-        "label": "BuRR-VL(geo)",
-        "burr_flags": BURR_VL_FLAGS,
-        "distribution": ["--geometric"],
-        "max_log2": 32,
-    },
-    "BuRR-VL-Zipf": {
-        "tool": "burr-vl",
-        "label": "BuRR-VL(zipf)",
-        "burr_flags": BURR_VL_FLAGS,
-        "distribution": ["--zipf", "2000"],
-        "max_log2": 32,
-    },
-    "BuRR-VL-Uni256": {
-        "tool": "burr-vl",
-        "label": "BuRR-VL(uni256)",
-        "burr_flags": BURR_VL_FLAGS,
-        "distribution": ["--uniform", "256"],
+        "no_queries": True,
         "max_log2": 32,
     },
     # -----------------------------------------------------------------
@@ -199,27 +164,27 @@ METHODS = {
     # bench_csf builds two BuRR-VL ribbons (filter + correction) with a
     # prefix-free code.  Bits-agnostic (bits/key is a result metric).
     #
-    # Build:  bench_csf -n <n> --geometric --coder fano -Q -w <file>
-    # Query:  bench_csf -n <n> --coder fano -r <file>
-    "CSF-Fano-Geo": {
+    # Build:  bench_csf -n <n> --geometric --coder huffman -Q -w <file>
+    # Query:  bench_csf -n <n> --coder huffman -r <file>
+    "CSF-Geo": {
         "tool": "csf",
-        "label": "CSF(Fano,geo)",
+        "label": "CSF(geo)",
         "distribution": ["--geometric"],
-        "coder": "fano",
+        "coder": "huffman",
         "max_log2": 32,
     },
-    "CSF-Fano-Zipf": {
+    "CSF-Zipf": {
         "tool": "csf",
-        "label": "CSF(Fano,zipf)",
+        "label": "CSF(zipf)",
         "distribution": ["--zipf", "2000"],
-        "coder": "fano",
+        "coder": "huffman",
         "max_log2": 32,
     },
-    "CSF-Fano-Uni256": {
+    "CSF-Uni256": {
         "tool": "csf",
-        "label": "CSF(Fano,uni256)",
+        "label": "CSF(uni256)",
         "distribution": ["--uniform", "256"],
-        "coder": "fano",
+        "coder": "huffman",
         "max_log2": 32,
     },
     # -----------------------------------------------------------------
@@ -256,6 +221,22 @@ METHODS = {
         "build_threads": DEFAULT_THREADS,
         "max_log2": 33,
     },
+    # -----------------------------------------------------------------
+    # PHast+ (minimal perfect hash + array)
+    # -----------------------------------------------------------------
+    #
+    # bench_phast builds a PHast+ function and queries it in-process.
+    # Bits-agnostic (bits/key is a result metric).
+    # No separate build/query phases — construction and queries run in
+    # a single invocation.
+    #
+    # Run:  bench_phast <n> <query_keys> <threads>
+    "Phast": {
+        "tool": "phast",
+        "label": "PHast+",
+        "build_threads": DEFAULT_THREADS,
+        "max_log2": 33,
+    },
 }
 
 
@@ -276,9 +257,9 @@ FIGURES = {
         "methods": [
             "Fuse3NoShards64",
             "Fuse3NoShards128",
-            "FuseLge3Shards",
+            "FuseLge3Shards-par",
             "FuseLge3Shards-seq",
-            "Mwhc3",
+            "Mwhc3-par",
             "BuRR-par",
             "BuRR-seq",
         ],
@@ -290,8 +271,8 @@ FIGURES = {
         "methods": [
             "Fuse3NoShards64",
             "Fuse3NoShards128",
-            "FuseLge3Shards",
-            "Mwhc3",
+            "FuseLge3Shards-par",
+            "Mwhc3-par",
             "BuRR-par",
         ],
         "column": "query_min",
@@ -302,18 +283,16 @@ FIGURES = {
         "methods": [
             "Fuse3NoShards64",
             "Fuse3NoShards128",
-            "FuseLge3Shards",
-            "Mwhc3",
+            "FuseLge3Shards-par",
+            "Mwhc3-par",
             "BuRR-par",
         ],
         "column": "parbench_max",
         "ylabel": "ns/key",
     },
     "comp": {
-        "title": "Construction",
-        # Cross-bit-width comparison: FuseLge3Shards-seq vs Fuse3NoShards128.
-        # All bit widths appear on the same plot (label includes bit width).
-        "methods": ["FuseLge3Shards-seq", "Fuse3NoShards128"],
+        "title": "Construction Comparison ({bits} bits)",
+        "methods": ["FuseLge3Shards-seq", "Fuse3NoShards128", "Phast"],
         "column": "constr_ns",
         "ylabel": "ns/key",
     },
@@ -321,37 +300,37 @@ FIGURES = {
     # These are bits-agnostic (auto-detected by the plot code).
     "csf-construction-geo": {
         "title": "CSF Construction (geometric)",
-        "methods": ["BuRR-VL-Geo", "CSF-Fano-Geo", "CompVFunc-Geo"],
+        "methods": ["CSF-Geo", "CompVFunc-Geo"],
         "column": "constr_ns",
         "ylabel": "ns/key",
     },
     "csf-construction-zipf": {
         "title": "CSF Construction (zipf 2k)",
-        "methods": ["BuRR-VL-Zipf", "CSF-Fano-Zipf", "CompVFunc-Zipf"],
+        "methods": ["CSF-Zipf", "CompVFunc-Zipf"],
         "column": "constr_ns",
         "ylabel": "ns/key",
     },
     "csf-construction-uni": {
         "title": "CSF Construction (uniform 256)",
-        "methods": ["BuRR-VL-Uni256", "CSF-Fano-Uni256", "CompVFunc-Uni256"],
+        "methods": ["CSF-Uni256", "CompVFunc-Uni256"],
         "column": "constr_ns",
         "ylabel": "ns/key",
     },
     "csf-queries-geo": {
         "title": "CSF Queries (geometric)",
-        "methods": ["BuRR-VL-Geo", "CSF-Fano-Geo", "CompVFunc-Geo"],
+        "methods": ["CSF-Geo", "CompVFunc-Geo"],
         "column": "query_min",
         "ylabel": "ns/key",
     },
     "csf-queries-zipf": {
         "title": "CSF Queries (zipf 2k)",
-        "methods": ["BuRR-VL-Zipf", "CSF-Fano-Zipf", "CompVFunc-Zipf"],
+        "methods": ["CSF-Zipf", "CompVFunc-Zipf"],
         "column": "query_min",
         "ylabel": "ns/key",
     },
     "csf-queries-uni": {
         "title": "CSF Queries (uniform 256)",
-        "methods": ["BuRR-VL-Uni256", "CSF-Fano-Uni256", "CompVFunc-Uni256"],
+        "methods": ["CSF-Uni256", "CompVFunc-Uni256"],
         "column": "query_min",
         "ylabel": "ns/key",
     },

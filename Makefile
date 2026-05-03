@@ -21,7 +21,7 @@ OPTFLAGS = -O3 -DNDEBUG -march=native
 LDFLAGS = $(BURR_VL)/sorter.o $(BURR_VL)/tlx/build/tlx/libtlx.a \
           -lpthread -ltbb -latomic
 
-all: bench_csf ribbon_vlr
+all: bench_csf
 
 # BuRR-VL dependencies: sorter object and tlx library
 $(BURR_VL)/sorter.o: $(BURR_VL)/sorter.cpp $(BURR_VL)/sorter.hpp
@@ -34,11 +34,8 @@ $(BURR_VL)/tlx/build/tlx/libtlx.a:
 bench_csf: $(BURR_VL)/sorter.o bench_csf.cpp $(BURR_VL)/tlx/build/tlx/libtlx.a
 	$(CXX) $(OPTFLAGS) $(CFLAGS) -o $@ bench_csf.cpp $(LDFLAGS)
 
-ribbon_vlr: $(BURR_VL)/sorter.o $(BURR_VL)/ribbon_vlr.cpp $(BURR_VL)/tlx/build/tlx/libtlx.a
-	$(CXX) $(OPTFLAGS) $(CFLAGS) -o $@ $(BURR_VL)/ribbon_vlr.cpp $(LDFLAGS)
-
 clean:
-	rm -f bench_csf ribbon_vlr $(BURR_VL)/sorter.o
+	rm -f bench_csf $(BURR_VL)/sorter.o
 	rm -rf $(BURR_VL)/tlx/build
 
 .PHONY: all clean

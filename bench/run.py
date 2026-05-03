@@ -2,25 +2,26 @@
 """
 Benchmark runner for the ε-cost sharding paper.
 
-Orchestrates build, query, and reporting for sux-rs (VFilter/VFunc)
-and BuRR (bumped ribbon) benchmarks.  Results are stored as individual
-files under results/<method>/, one per (n, bits) data point, enabling
-interrupt/resume without losing partial progress.
+Orchestrates build, query, and reporting for sux-rs (VFilter/VFunc/CompVFunc),
+BuRR (bumped ribbon), and CSF (compressed static functions via BuRR-VL)
+benchmarks.  Results are stored as individual files under
+results/<method>/, one per (n, bits) data point, enabling interrupt/resume
+without losing partial progress.
 
 Usage examples:
 
     # Smoke test: one method, 8 bits, small sizes
-    python bench/run.py bench --method FuseLge3Shards --bits 8 --max-log2 22
+    python bench/run.py bench --method FuseLge3Shards-par --bits 8 --max-log2 22
 
     # Full run with CPU pinning
     python bench/run.py bench --method all --bits all \\
         --pin "chrt -f 99 taskset -c 2"
 
-    # Tab-separated report to stdout (pipe to file, grep, cut …)
-    python bench/run.py report --method FuseLge3Shards --bits 8
+    # Report to stdout
+    python bench/run.py report --method FuseLge3Shards-par --bits 8
 
     # Parallel query benchmark (96 instances via GNU parallel)
-    python bench/run.py par-bench --method FuseLge3Shards --bits 8 \\
+    python bench/run.py par-bench --method FuseLge3Shards-par --bits 8 \\
         --max-log2 30 --jobs 96
 
     # Generate paper figures
@@ -61,7 +62,8 @@ from configs import (  # noqa: E402
     SUX_FEATURES,
     SUX_PROFILE,
 )
-from parse import compute_overhead, parse_build, parse_burr_size, parse_query
+from parse import (compute_overhead, distribution_entropy, parse_build,
+                    parse_burr_size, parse_query)
 
 # Repo root: bench/ is one level below the repository root, which
 # contains the sux-rs/ and BuRR/ submodules.
@@ -73,7 +75,7 @@ REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 # =====================================================================
 
 
-_PARSE_TOOL_MAP = {"burr-vl": "burr", "csf": "burr", "comp-vfunc": "sux"}
+_PARSE_TOOL_MAP = {"csf": "burr", "comp-vfunc": "sux", "phast": "sux"}
 
 
 def _parse_tool(tool):
@@ -167,15 +169,15 @@ def ensure_sux_built(sux_dir, need_comp_vfunc=False):
     for all current benchmarks.
     """
     sux = Path(sux_dir)
-    vfilter = sux / "target" / "release" / "vfilter"
-    bench_vfilter = sux / "target" / "release" / "examples" / "bench_vfilter"
-    comp_vfunc = sux / "target" / "release" / "comp_vfunc"
-    bench_comp_vfunc = sux / "target" / "release" / "examples" / "bench_comp_vfunc"
-
-    bins_present = vfilter.exists() and bench_vfilter.exists()
-    comp_present = comp_vfunc.exists() and bench_comp_vfunc.exists()
-
-    if bins_present and (not need_comp_vfunc or comp_present):
+    examples = sux / "target" / "release" / "examples"
+    needed = [
+        sux / "target" / "release" / "vfilter",
+        examples / "bench_vfilter",
+        sux / "target" / "release" / "comp_vfunc",
+        examples / "bench_comp_vfunc",
+        examples / "bench_phast",
+    ]
+    if all(p.exists() for p in needed):
         return
 
     print(f"Building sux-rs binaries in {sux}…")
@@ -187,6 +189,7 @@ def ensure_sux_built(sux_dir, need_comp_vfunc=False):
         "--example", "bench_vfilter",
         "--bin", "comp_vfunc",
         "--example", "bench_comp_vfunc",
+        "--example", "bench_phast",
     ]
     r = subprocess.run(cmd, cwd=str(sux), capture_output=True, text=True)
     if r.returncode != 0:
@@ -194,21 +197,20 @@ def ensure_sux_built(sux_dir, need_comp_vfunc=False):
         sys.exit(f"cargo build failed (exit {r.returncode})")
 
 
-def ensure_burr_vl_built():
-    """Ensure bench_csf and ribbon_vlr are built via the top-level Makefile."""
+def ensure_csf_built():
+    """Ensure bench_csf is built via the top-level Makefile."""
     bench_csf = Path(REPO_ROOT) / "bench_csf"
-    ribbon_vlr = Path(REPO_ROOT) / "ribbon_vlr"
-    if bench_csf.exists() and ribbon_vlr.exists():
+    if bench_csf.exists():
         return True
 
-    print("Building BuRR-VL binaries…")
+    print("Building bench_csf…")
     r = subprocess.run(
-        ["make"],
+        ["make", "bench_csf"],
         cwd=REPO_ROOT, capture_output=True, text=True,
     )
     if r.returncode != 0:
         print(r.stderr, file=sys.stderr)
-        print("WARNING: BuRR-VL build failed, skipping BuRR-VL/CSF methods")
+        print("WARNING: bench_csf build failed, skipping CSF methods")
         return False
     return True
 
@@ -231,7 +233,7 @@ def ensure_burr_built(burr_dir, bits_values):
             continue
         print(f"Building BuRR bench{bits} in {burr}…")
         r = subprocess.run(
-            ["make", f"RIBBON_BITS={bits}", "bench"],
+            ["make", "CXX=clang++", f"RIBBON_BITS={bits}", "bench"],
             cwd=str(burr), capture_output=True, text=True,
         )
         if r.returncode != 0:
@@ -386,40 +388,11 @@ def comp_vfunc_query_cmd(cfg, n, infile, args):
     return cmd
 
 
-def burr_vl_build_cmd(cfg, n, outfile, args):
-    """Assemble the ribbon_vlr build command (no queries, serialize).
-
-    Example:
-        ribbon_vlr -t 1 -L 128 -d 2 -2 -I -n 1048576 --geometric -Q -w output.bin
-    """
-    cmd = [str(Path(REPO_ROOT) / "ribbon_vlr")]
-    cmd += ["-t", "1"]
-    cmd += cfg["burr_flags"]
-    cmd += ["-n", str(n)]
-    cmd += cfg["distribution"]
-    cmd += ["-Q", "-w", str(outfile)]
-    return cmd
-
-
-def burr_vl_query_cmd(cfg, n, infile, args):
-    """Assemble the ribbon_vlr query command (deserialize, run queries).
-
-    Example:
-        ribbon_vlr -t 1 -L 128 -d 2 -2 -I -n 1048576 -r input.bin
-    """
-    cmd = [str(Path(REPO_ROOT) / "ribbon_vlr")]
-    cmd += ["-t", "1"]
-    cmd += cfg["burr_flags"]
-    cmd += ["-n", str(n)]
-    cmd += ["-r", str(infile)]
-    return cmd
-
-
 def csf_build_cmd(cfg, n, outfile):
     """Assemble the bench_csf build command (no queries, serialize).
 
     Example:
-        bench_csf -n 1048576 --geometric --coder fano -Q -w output.bin
+        bench_csf -n 1048576 --geometric --coder huffman -Q -w output.bin
     """
     cmd = [str(Path(REPO_ROOT) / "bench_csf")]
     cmd += ["-n", str(n)]
@@ -433,7 +406,7 @@ def csf_query_cmd(cfg, n, infile):
     """Assemble the bench_csf query command (deserialize, run queries).
 
     Example:
-        bench_csf -n 1048576 --coder fano -r input.bin
+        bench_csf -n 1048576 --coder huffman -r input.bin
     """
     cmd = [str(Path(REPO_ROOT) / "bench_csf")]
     cmd += ["-n", str(n)]
@@ -494,17 +467,18 @@ def cmd_bench(args):
     # Ensure binaries are compiled.
     sux_needed = any(METHODS[m]["tool"] == "sux" for m in methods)
     comp_vfunc_needed = any(METHODS[m]["tool"] == "comp-vfunc" for m in methods)
+    phast_needed = any(METHODS[m]["tool"] == "phast" for m in methods)
     burr_needed = any(METHODS[m]["tool"] == "burr" for m in methods)
-    burr_vl_needed = any(METHODS[m]["tool"] in ("burr-vl", "csf") for m in methods)
+    csf_needed = any(METHODS[m]["tool"] == "csf" for m in methods)
     burr_ok = True
-    burr_vl_ok = True
+    csf_ok = True
 
-    if sux_needed or comp_vfunc_needed:
+    if sux_needed or comp_vfunc_needed or phast_needed:
         ensure_sux_built(args.sux_dir, need_comp_vfunc=comp_vfunc_needed)
     if burr_needed:
         burr_ok = ensure_burr_built(args.burr_dir, bits_list)
-    if burr_vl_needed:
-        burr_vl_ok = ensure_burr_vl_built()
+    if csf_needed:
+        csf_ok = ensure_csf_built()
 
     # Build the work list: (log2_n, method_name, bits) triples,
     # ordered by size first so that if a method OOMs we still have
@@ -516,12 +490,12 @@ def cmd_bench(args):
         if cfg["tool"] == "burr" and not burr_ok:
             print(f"Skipping {method_name} (BuRR not available)")
             continue
-        if cfg["tool"] in ("burr-vl", "csf") and not burr_vl_ok:
-            print(f"Skipping {method_name} (BuRR-VL binaries not available)")
+        if cfg["tool"] == "csf" and not csf_ok:
+            print(f"Skipping {method_name} (bench_csf not available)")
             continue
 
         max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
-        bits_agnostic = cfg["tool"] in ("burr-vl", "csf", "comp-vfunc")
+        bits_agnostic = cfg["tool"] in ("csf", "comp-vfunc", "phast")
         method_bits = [0] if bits_agnostic else bits_list
 
         for bits in method_bits:
@@ -543,15 +517,15 @@ def cmd_bench(args):
         if cfg["tool"] == "comp-vfunc":
             _bench_comp_vfunc(cfg, method_name, n, log2_n,
                              rdir, args)
-        elif cfg["tool"] == "burr-vl":
-            _bench_burr_vl(cfg, method_name, n, log2_n,
-                            rdir, args)
         elif cfg["tool"] == "csf":
             _bench_csf(cfg, method_name, n, log2_n,
                            rdir, args)
         elif cfg["tool"] == "burr":
             _bench_burr(cfg, method_name, n, bits, log2_n,
                         rdir, args)
+        elif cfg["tool"] == "phast":
+            _bench_phast(cfg, method_name, n, log2_n,
+                         rdir, args)
         else:
             _bench_sux(cfg, method_name, n, bits, log2_n,
                        rdir, args)
@@ -582,8 +556,10 @@ def _bench_burr(cfg, method_name, n, bits, log2_n, rdir, args):
     result = run_cmd(cmd, dry_run=args.dry_run)
 
     # --- Query (deserialize, single-threaded, pinned) ---
-    qcmd = burr_query_cmd(cfg, n, bits, outfile, args)
-    qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
+    qr = None
+    if not cfg.get("no_queries"):
+        qcmd = burr_query_cmd(cfg, n, bits, outfile, args)
+        qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
 
     if args.dry_run:
         return
@@ -649,49 +625,33 @@ def _bench_comp_vfunc(cfg, method_name, n, log2_n, rdir, args):
         outfile.unlink()
 
 
-def _bench_burr_vl(cfg, method_name, n, log2_n, rdir, args):
-    """Run a single BuRR-VL benchmark: build, serialize, query, delete.
+def _bench_phast(cfg, method_name, n, log2_n, rdir, args):
+    """Run a PHast+ benchmark: build and query in one invocation.
 
-    Plain variable-length ribbon retrieval.  Same two-step pattern as
-    BuRR: build unpinned with -Q -w, query pinned with -r.
+    bench_phast <n> <query_keys> <threads> --repeats 5
+    Output (construction + queries) goes to stderr.
     """
-    ddir = data_dir(args.results_dir, method_name)
-    outfile = ddir / f"vlr.{n}.bin"
+    sux = Path(args.sux_dir)
+    cmd = [str(sux / "target" / "release" / "examples" / "bench_phast")]
+    cmd += [str(n), str(QUERY_KEYS)]
 
-    # --- Build (unpinned) ---
-    cmd = burr_vl_build_cmd(cfg, n, outfile, args)
+    threads = cfg.get("build_threads")
+    if args.threads is not None:
+        threads = args.threads
+    cmd += [str(threads or 1)]
+
     print(f"  bench {method_name} n=2^{log2_n}")
-    result = run_cmd(cmd, dry_run=args.dry_run)
+    result = run_cmd(cmd, pin=args.pin, dry_run=args.dry_run)
 
-    # --- Query (pinned) ---
-    qcmd = burr_vl_query_cmd(cfg, n, outfile, args)
-    qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
-
-    if args.dry_run:
+    if args.dry_run or result is None:
         return
 
-    if result is None:
-        return
-
-    build_output = result.stdout
-    (rdir / f"bench.{n}.0.err").write_text(build_output)
-
-    mem_size = parse_burr_size(build_output)
-    if mem_size is not None:
-        (rdir / f"bench.{n}.0.size").write_text(str(mem_size))
-
-    if qr is not None:
-        with open(rdir / f"bench.{n}.0.err", "a") as f:
-            f.write("\n--- query ---\n")
-            f.write(qr.stdout)
-
-    # --- Clean up ---
-    if not args.keep_data and outfile.exists():
-        outfile.unlink()
+    output = result.stderr
+    (rdir / f"bench.{n}.0.err").write_text(output)
 
 
 def _bench_csf(cfg, method_name, n, log2_n, rdir, args):
-    """Run a single BuRR-VL benchmark: build, serialize, query, delete.
+    """Run a single CSF benchmark: build, serialize, query, delete.
 
     Same separation as BuRR: build unpinned with -Q -w, query pinned
     with -r.  Results stored with bits=0.
@@ -747,7 +707,7 @@ def _bench_sux(cfg, method_name, n, bits, log2_n, rdir, args):
 
     # --- Query (pinned) ---
     qr = None
-    if cfg.get("bench_bin"):
+    if not cfg.get("no_queries"):
         qcmd = sux_query_cmd(cfg, n, bits, outfile, args)
         qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
 
@@ -808,14 +768,14 @@ def cmd_par_bench(args):
     for method_name in methods:
         cfg = METHODS[method_name]
 
-        # Build-only methods (e.g., FuseLge3Shards-seq) have no queries.
-        if cfg["tool"] == "sux" and not cfg.get("bench_bin"):
+        # Build-only methods (e.g., FuseLge3Shards-seq, BuRR-seq).
+        if cfg.get("no_queries"):
             continue
         if cfg["tool"] == "burr" and not burr_ok:
             print(f"Skipping {method_name} (BuRR not available)")
             continue
-        # BuRR-VL, CSF, and CompVFunc don't support par-query yet.
-        if cfg["tool"] in ("burr-vl", "csf", "comp-vfunc"):
+        # CSF and CompVFunc don't support par-query yet.
+        if cfg["tool"] in ("csf", "comp-vfunc", "phast"):
             continue
 
         max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
@@ -928,7 +888,11 @@ def cmd_report(args):
 
     Columns:
         n  bits  method  constr_ns  query_min  query_median  query_max
-        query_avg  parbench_max  overhead_pct  file_bytes
+        query_avg  parbench_max  bits_per_key  overhead_pct  file_bytes
+
+    For filters (sux, burr), overhead_pct is relative to the bit width.
+    For compressed functions (csf, comp-vfunc), it is relative to the
+    distribution entropy.
 
     Columns are padded with spaces for readability; spaces are
     non-significant so the output can still be split on whitespace.
@@ -937,8 +901,8 @@ def cmd_report(args):
     bits_list = resolve_bits(args.bits)
 
     cols = ["n", "bits", "method", "constr_ns", "query_min", "query_median",
-            "query_max", "query_avg", "parbench_max", "overhead_pct",
-            "file_bytes"]
+            "query_max", "query_avg", "parbench_max",
+            "bits_per_key", "overhead_pct", "file_bytes"]
 
     rows = []
     for method_name in methods:
@@ -949,8 +913,10 @@ def cmd_report(args):
 
         max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
         tool_for_parse = _parse_tool(cfg["tool"])
-        bits_agnostic = cfg["tool"] in ("burr-vl", "csf", "comp-vfunc")
+        bits_agnostic = cfg["tool"] in ("csf", "comp-vfunc", "phast")
         method_bits = [0] if bits_agnostic else bits_list
+
+        entropy = distribution_entropy(cfg.get("distribution"))
 
         for bits in method_bits:
             for log2_n in range(MIN_LOG2, max_log2 + 1):
@@ -971,11 +937,15 @@ def cmd_report(args):
 
                 size_file = rdir / f"bench.{n}.{bits}.size"
                 file_bytes = ""
+                bpk = ""
                 overhead = ""
                 if size_file.exists():
                     file_bytes = int(size_file.read_text().strip())
+                    bpk = f"{file_bytes * 8.0 / n:.2f}"
                     if bits > 0:
                         overhead = f"{compute_overhead(file_bytes, n, bits):.2f}"
+                    elif entropy is not None:
+                        overhead = f"{compute_overhead(file_bytes, n, entropy):.2f}"
 
                 rows.append([
                     str(n), str(bits), method_name,
@@ -985,6 +955,7 @@ def cmd_report(args):
                     _fmt(qd.get("query_max")),
                     _fmt(qd.get("query_avg")),
                     _fmt(pq_max),
+                    str(bpk),
                     str(overhead),
                     str(file_bytes),
                 ])
@@ -1027,26 +998,32 @@ def cmd_plot(args):
     except ImportError:
         sys.exit("matplotlib is required for plotting: pip install matplotlib")
 
-    figure_name = args.figure
-    if figure_name not in FIGURES:
-        sys.exit(f"Unknown figure: {figure_name}\n"
-                 f"Available: {', '.join(FIGURES)}")
+    if args.figure == "all":
+        figure_names = list(FIGURES.keys())
+    else:
+        if args.figure not in FIGURES:
+            sys.exit(f"Unknown figure: {args.figure}\n"
+                     f"Available: {', '.join(FIGURES)}")
+        figure_names = [args.figure]
 
+    for figure_name in figure_names:
+        _plot_one(figure_name, args, plt)
+
+
+def _plot_one(figure_name, args, plt):
+    """Generate PDFs for a single figure preset."""
     fig_cfg = FIGURES[figure_name]
     bits_list = resolve_bits(args.bits)
     markers = ["o", "s", "^", "v", "p", "*", "h", "D"]
     col = fig_cfg["column"]
 
-    # If every method in this figure is bits-agnostic, force bits=[0].
     all_agnostic = all(
-        METHODS[m]["tool"] in ("burr-vl", "csf", "comp-vfunc")
+        METHODS[m]["tool"] in ("csf", "comp-vfunc")
         for m in fig_cfg["methods"] if m in METHODS
     )
     if all_agnostic:
         bits_list = [0]
 
-    # First pass: find the global ymax across all bit widths so that
-    # every plot of the same figure type uses the same scale.
     global_ymax = 0.0
     for bits in bits_list:
         for method_name in fig_cfg["methods"]:
@@ -1073,7 +1050,6 @@ def cmd_plot(args):
                     global_ymax = val
     global_ymax *= 1.15
 
-    # Second pass: generate one plot per bit width.
     for bits in bits_list:
         plt.figure(figsize=(8, 5.5))
         mi = 0
@@ -1122,7 +1098,8 @@ def cmd_plot(args):
         plt.xlabel("Number of keys")
         plt.ylabel(fig_cfg["ylabel"])
         plt.xscale("log")
-        plt.legend()
+        if mi > 0:
+            plt.legend()
         if global_ymax > 0:
             plt.ylim(0, global_ymax)
 
@@ -1153,7 +1130,7 @@ def cmd_status(args):
         done_bench, done_pq = 0, 0
         total = 0
         tool_for_parse = _parse_tool(cfg["tool"])
-        bits_agnostic = cfg["tool"] in ("burr-vl", "csf", "comp-vfunc")
+        bits_agnostic = cfg["tool"] in ("csf", "comp-vfunc", "phast")
         method_bits = [0] if bits_agnostic else bits_list
 
         for bits in method_bits:
@@ -1259,8 +1236,8 @@ def make_parser():
 
     # --- plot ---
     pl = sub.add_parser("plot", help="Generate paper figures")
-    pl.add_argument("--figure", required=True,
-                    help=f"Figure preset: {', '.join(FIGURES)}")
+    pl.add_argument("--figure", default="all",
+                    help=f"Figure preset, or 'all' (default): {', '.join(FIGURES)}")
     pl.add_argument("--bits", default="even",
                     help="Bit widths for figures")
     pl.add_argument("--max-log2", type=int, default=33)
