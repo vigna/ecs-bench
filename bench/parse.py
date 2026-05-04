@@ -46,11 +46,18 @@ def parse_build(text, tool):
         # or
         #   "Construction completed … 45.3 ns/key"
         # We match any line with "onstruction" and "ns/key".
-        m = re.search(r'onstruction.*?(\d+\.?\d*)\s*ns/key', text)
+        # For large instances, the unit may be μs/key or ms/key.
+        m = re.search(r'onstruction.*?(\d+\.?\d*)\s*(ns|μs|ms)/key', text)
         if not m:
-            m = re.search(r'Elapsed:.*?(\d+\.?\d*)\s*ns/key', text)
+            m = re.search(r'Elapsed:.*?(\d+\.?\d*)\s*(ns|μs|ms)/key', text)
         if m:
-            result["constr_ns"] = float(m.group(1))
+            val = float(m.group(1))
+            unit = m.group(2)
+            if unit == "μs":
+                val *= 1000.0
+            elif unit == "ms":
+                val *= 1_000_000.0
+            result["constr_ns"] = val
     elif tool == "burr":
         # BuRR logs: "Completed in Xms, N keys, X ns/key"
         m = re.search(r'Completed in.*?(\d+\.?\d*)\s*ns/key', text)

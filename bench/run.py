@@ -790,115 +790,120 @@ def cmd_par_bench(args):
     if burr_needed:
         burr_ok = ensure_burr_built(args.burr_dir, bits_list)
 
+    # Build work list sorted by size, like cmd_bench.
+    work = []
     for method_name in methods:
         cfg = METHODS[method_name]
 
-        # Build-only methods (e.g., FuseLge3Shards-seq, BuRR-seq).
         if cfg.get("no_queries"):
             continue
         if cfg["tool"] == "burr" and not burr_ok:
             print(f"Skipping {method_name} (BuRR not available)")
             continue
-        # CSF and CompVFunc don't support par-query yet.
         if cfg["tool"] in ("csf", "comp-vfunc", "phast"):
             continue
 
         max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
-        rdir = result_dir(args.results_dir, method_name)
-        ddir = data_dir(args.results_dir, method_name)
 
         for bits in bits_list:
             max_n = par_query_limit(bits)
-
             for log2_n in range(MIN_LOG2, max_log2 + 1):
                 n = 1 << log2_n
-
                 if n > max_n:
                     continue
+                work.append((log2_n, method_name, bits))
 
-                agg_err = rdir / f"parbench.{n}.{bits}.err"
-                if not args.force and agg_err.exists() and \
-                        parse_query(agg_err.read_text(), cfg["tool"]):
-                    continue
+    work.sort(key=lambda t: t[0])
 
-                # --- Build and serialize ---
-                outfile = ddir / f"filter.{n}.{bits}.bin"
+    for log2_n, method_name, bits in work:
+        cfg = METHODS[method_name]
+        n = 1 << log2_n
+        rdir = result_dir(args.results_dir, method_name)
+        ddir = data_dir(args.results_dir, method_name)
 
-                if cfg["tool"] == "sux":
-                    build_cmd = sux_build_cmd(cfg, n, bits, outfile, args)
-                else:
-                    build_cmd = burr_bench_cmd(cfg, n, bits, args,
-                                               serialize_to=outfile)
-                    build_cmd += ["-Q"]
+        agg_err = rdir / f"parbench.{n}.{bits}.err"
+        if not args.force and agg_err.exists() and \
+                parse_query(agg_err.read_text(), cfg["tool"]):
+            continue
 
-                print(f"  par-bench {method_name} n=2^{log2_n} bits={bits}"
-                      f" (build)")
-                br = run_cmd(build_cmd, dry_run=args.dry_run)
-                if br is None and not args.dry_run:
-                    continue
+        # --- Build and serialize ---
+        outfile = ddir / f"filter.{n}.{bits}.bin"
 
-                if args.dry_run:
-                    print(f"  [dry-run] echo <{args.jobs} commands> | "
-                          f"parallel -j {args.jobs}")
-                    continue
+        if cfg["tool"] == "sux":
+            build_cmd = sux_build_cmd(cfg, n, bits, outfile, args)
+        else:
+            build_cmd = burr_bench_cmd(cfg, n, bits, args,
+                                       serialize_to=outfile)
+            build_cmd += ["-Q"]
 
-                if not outfile.exists():
-                    print(f"  ERROR: serialized file not created",
-                          file=sys.stderr)
-                    continue
+        print(f"  par-bench {method_name} n=2^{log2_n} bits={bits}"
+              f" (build)")
+        br = run_cmd(build_cmd, dry_run=args.dry_run)
+        if br is None and not args.dry_run:
+            continue
 
-                # --- Parallel queries ---
-                if cfg["tool"] == "sux":
-                    qcmd = sux_query_cmd(cfg, n, bits, outfile, args)
-                else:
-                    qcmd = burr_query_cmd(cfg, n, bits, outfile, args)
+        if args.dry_run:
+            print(f"  [dry-run] echo <{args.jobs} commands> | "
+                  f"parallel -j {args.jobs}")
+            continue
 
-                if args.pin:
-                    qcmd = shlex.split(args.pin) + qcmd
+        if not outfile.exists():
+            print(f"  ERROR: serialized file not created",
+                  file=sys.stderr)
+            continue
 
-                instance_dir = rdir / f"parbench.{n}.{bits}.d"
-                instance_dir.mkdir(parents=True, exist_ok=True)
+        # --- Parallel queries ---
+        if cfg["tool"] == "sux":
+            qcmd = sux_query_cmd(cfg, n, bits, outfile, args)
+        else:
+            qcmd = burr_query_cmd(cfg, n, bits, outfile, args)
 
-                jobs = []
-                for i in range(args.jobs):
-                    out_file = instance_dir / f"{i}.err"
-                    if cfg["tool"] == "sux":
-                        job = shlex.join(qcmd) + f" 2>{out_file}"
-                    else:
-                        job = shlex.join(qcmd) + f" >{out_file}"
-                    jobs.append(job)
+        if args.pin:
+            qcmd = shlex.split(args.pin) + qcmd
 
-                print(f"  par-bench {method_name} n=2^{log2_n} bits={bits}"
-                      f" ({args.jobs} queries)")
+        instance_dir = rdir / f"parbench.{n}.{bits}.d"
+        instance_dir.mkdir(parents=True, exist_ok=True)
 
-                par_input = "\n".join(jobs)
-                r = subprocess.run(
-                    ["parallel", "-j", str(args.jobs)],
-                    input=par_input, capture_output=True, text=True,
-                )
-                if r.returncode != 0:
-                    print(f"  WARNING: parallel returned {r.returncode}",
-                          file=sys.stderr)
+        jobs = []
+        for i in range(args.jobs):
+            out_file = instance_dir / f"{i}.err"
+            if cfg["tool"] == "sux":
+                job = shlex.join(qcmd) + f" 2>{out_file}"
+            else:
+                job = shlex.join(qcmd) + f" >{out_file}"
+            jobs.append(job)
 
-                # Aggregate: worst-case Max across all instances.
-                worst_max = 0.0
-                for i in range(args.jobs):
-                    ifile = instance_dir / f"{i}.err"
-                    if not ifile.exists():
-                        continue
-                    qdata = parse_query(ifile.read_text(), cfg["tool"])
-                    if "query_max" in qdata:
-                        worst_max = max(worst_max, qdata["query_max"])
+        print(f"  par-bench {method_name} n=2^{log2_n} bits={bits}"
+              f" ({args.jobs} queries)")
 
-                agg_err.write_text(
-                    f"Min: {worst_max} Median: {worst_max} "
-                    f"Max: {worst_max} Average: {worst_max}\n"
-                )
+        par_input = "\n".join(jobs)
+        r = subprocess.run(
+            ["parallel", "-j", str(args.jobs)],
+            input=par_input, capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            print(f"  WARNING: parallel returned {r.returncode}",
+                  file=sys.stderr)
 
-                # --- Clean up ---
-                shutil.rmtree(instance_dir, ignore_errors=True)
-                if outfile.exists():
-                    outfile.unlink()
+        # Aggregate: worst-case Max across all instances.
+        worst_max = 0.0
+        for i in range(args.jobs):
+            ifile = instance_dir / f"{i}.err"
+            if not ifile.exists():
+                continue
+            qdata = parse_query(ifile.read_text(), cfg["tool"])
+            if "query_max" in qdata:
+                worst_max = max(worst_max, qdata["query_max"])
+
+        agg_err.write_text(
+            f"Min: {worst_max} Median: {worst_max} "
+            f"Max: {worst_max} Average: {worst_max}\n"
+        )
+
+        # --- Clean up ---
+        shutil.rmtree(instance_dir, ignore_errors=True)
+        if outfile.exists():
+            outfile.unlink()
 
     print("Done.")
 
