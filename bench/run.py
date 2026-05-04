@@ -75,6 +75,17 @@ REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 # =====================================================================
 
 
+def sux_target_dir(sux_dir):
+    """Return the cargo target directory for the sux-rs crate.
+
+    Respects CARGO_TARGET_DIR if set.  Falls back to <sux_dir>/target.
+    """
+    v = os.environ.get("CARGO_TARGET_DIR")
+    if v:
+        return Path(v)
+    return Path(sux_dir) / "target"
+
+
 _PARSE_TOOL_MAP = {"csf": "burr", "comp-vfunc": "sux", "phast": "sux"}
 
 
@@ -169,13 +180,14 @@ def ensure_sux_built(sux_dir, need_comp_vfunc=False):
     for all current benchmarks.
     """
     sux = Path(sux_dir)
-    examples = sux / "target" / "release" / "examples"
+    target = sux_target_dir(sux_dir)
+    examples = target / "release" / "examples"
     needed = [
-        sux / "target" / "release" / "vfilter",
-        sux / "target" / "release" / "vfunc",
+        target / "release" / "vfilter",
+        target / "release" / "vfunc",
         examples / "bench_vfilter",
         examples / "bench_vfunc",
-        sux / "target" / "release" / "comp_vfunc",
+        target / "release" / "comp_vfunc",
         examples / "bench_comp_vfunc",
         examples / "bench_phast",
     ]
@@ -262,8 +274,8 @@ def sux_build_cmd(cfg, n, bits, outfile, args):
     For power-of-2 widths (8, 16, 32) the backend is a boxed slice of
     the matching primitive, which is inherently aligned.
     """
-    sux = Path(args.sux_dir)
-    cmd = [str(sux / "target" / "release" / cfg["build_bin"])]
+    target = sux_target_dir(args.sux_dir)
+    cmd = [str(target / "release" / cfg["build_bin"])]
     cmd += ["-n", str(n)]
     cmd += ["--shard-edge", cfg["shard_edge"]]
     if bits > 0:
@@ -299,8 +311,8 @@ def sux_query_cmd(cfg, n, bits, infile, args):
         bench_vfilter 100000000 output.bin --edge fuse-lge3-shards
                       --bits 9 --unaligned
     """
-    sux = Path(args.sux_dir)
-    cmd = [str(sux / "target" / "release" / "examples" / cfg["bench_bin"])]
+    target = sux_target_dir(args.sux_dir)
+    cmd = [str(target / "release" / "examples" / cfg["bench_bin"])]
     cmd += [str(QUERY_KEYS)]             # number of query operations
     cmd += [str(infile)]                 # serialized structure
     cmd += ["--edge", cfg["shard_edge"]]
@@ -364,8 +376,8 @@ def comp_vfunc_build_cmd(cfg, n, outfile, args):
         comp_vfunc -n 1048576 --geometric --shard-edge fuse3-shards
                    --threads 32 output.bin
     """
-    sux = Path(args.sux_dir)
-    cmd = [str(sux / "target" / "release" / "comp_vfunc")]
+    target = sux_target_dir(args.sux_dir)
+    cmd = [str(target / "release" / "comp_vfunc")]
     cmd += ["-n", str(n)]
     cmd += cfg["distribution"]
     cmd += ["--shard-edge", cfg["shard_edge"]]
@@ -386,8 +398,8 @@ def comp_vfunc_query_cmd(cfg, n, infile, args):
     Example:
         bench_comp_vfunc 100000000 output.bin --edge fuse3-shards
     """
-    sux = Path(args.sux_dir)
-    cmd = [str(sux / "target" / "release" / "examples" / "bench_comp_vfunc")]
+    target = sux_target_dir(args.sux_dir)
+    cmd = [str(target / "release" / "examples" / "bench_comp_vfunc")]
     cmd += [str(QUERY_KEYS)]
     cmd += [str(infile)]
     cmd += ["--edge", cfg["shard_edge"]]
@@ -638,8 +650,8 @@ def _bench_phast(cfg, method_name, n, log2_n, rdir, args):
     bench_phast <n> <query_keys> <threads> --repeats 5
     Output (construction + queries) goes to stderr.
     """
-    sux = Path(args.sux_dir)
-    cmd = [str(sux / "target" / "release" / "examples" / "bench_phast")]
+    target = sux_target_dir(args.sux_dir)
+    cmd = [str(target / "release" / "examples" / "bench_phast")]
     cmd += [str(n), str(QUERY_KEYS)]
 
     threads = cfg.get("build_threads")
