@@ -16,7 +16,7 @@ INCLUDES = -I$(BURR_VL) \
            -I$(LSF)/include
 
 CFLAGS = -std=c++20 -march=native -D_REENTRANT $(INCLUDES)
-OPTFLAGS = -O3 -DNDEBUG -march=native
+OPTFLAGS = -O3 -DNDEBUG -march=native -fPIE
 
 LDFLAGS = $(BURR_VL)/sorter.o $(BURR_VL)/tlx/build/tlx/libtlx.a \
           -lpthread -ltbb -latomic

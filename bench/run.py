@@ -254,7 +254,8 @@ def ensure_burr_built(burr_dir, bits_values):
             continue
         print(f"Building BuRR bench{bits} in {burr}…")
         r = subprocess.run(
-            ["make", f"RIBBON_BITS={bits}", "bench"],
+            ["make", f"RIBBON_BITS={bits}",
+             "OPTFLAGS=-O3 -DNDEBUG -march=native -fPIE", "bench"],
             cwd=str(burr), capture_output=True, text=True,
         )
         if r.returncode != 0:

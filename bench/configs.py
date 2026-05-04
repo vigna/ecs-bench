@@ -33,11 +33,9 @@ MIN_LOG2 = 20
 # count so that per-query timing is directly comparable.
 QUERY_KEYS = 100_000_000
 
-# Default parallel instances for par-bench.  Defaults to half the
-# available CPUs — using all cores causes problems on architectures
-# with heterogeneous cores (P/E cores) or heavy hyperthreading.
 import os
 
+# Default thread count for parallel construction (build_threads).
 DEFAULT_THREADS = max(1, os.cpu_count() // 2)
 
 # Default number of parallel query instances for par-bench.
