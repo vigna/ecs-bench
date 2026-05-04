@@ -43,5 +43,10 @@ bench_csf: $(BURR_VL)/sorter.o bench_csf.cpp $(BURR_VL)/tlx/build/tlx/libtlx.a
 clean:
 	rm -f bench_csf $(BURR_VL)/sorter.o
 	rm -rf $(BURR_VL)/tlx/build
+	rm -f BuRR/bench[0-9]* BuRR/ribbon[0-9]* BuRR/debug[0-9]* \
+	      BuRR/parbench[0-9]* BuRR/parrun[0-9]* BuRR/pardbg[0-9]* \
+	      BuRR/sorter.o BuRR/tests
+	rm -rf BuRR/tlx/build
+	cd sux-rs && cargo clean 2>/dev/null || true
 
 .PHONY: all init clean
