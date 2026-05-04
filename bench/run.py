@@ -78,11 +78,16 @@ REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 def sux_target_dir(sux_dir):
     """Return the cargo target directory for the sux-rs crate.
 
-    Respects CARGO_TARGET_DIR if set.  Falls back to <sux_dir>/target.
+    Respects CARGO_TARGET_DIR if set (resolved relative to sux_dir,
+    matching cargo's behavior when invoked from that directory).
+    Falls back to <sux_dir>/target.
     """
     v = os.environ.get("CARGO_TARGET_DIR")
     if v:
-        return Path(v)
+        p = Path(v)
+        if not p.is_absolute():
+            p = Path(sux_dir) / p
+        return p
     return Path(sux_dir) / "target"
 
 
