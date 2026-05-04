@@ -23,6 +23,12 @@ LDFLAGS = $(BURR_VL)/sorter.o $(BURR_VL)/tlx/build/tlx/libtlx.a \
 
 all: bench_csf
 
+# Initialize submodules without pulling LearnedStaticFunction's nested
+# tensorflow (4GB+).  Use this instead of git clone --recurse-submodules.
+init:
+	git submodule update --init --recursive BuRR BuRR-VL sux-rs
+	git submodule update --init LearnedStaticFunction
+
 # BuRR-VL dependencies: sorter object and tlx library
 $(BURR_VL)/sorter.o: $(BURR_VL)/sorter.cpp $(BURR_VL)/sorter.hpp
 	$(CXX) $(OPTFLAGS) $(CFLAGS) -Wno-unused-function -c -o $@ $<
@@ -38,4 +44,4 @@ clean:
 	rm -f bench_csf $(BURR_VL)/sorter.o
 	rm -rf $(BURR_VL)/tlx/build
 
-.PHONY: all clean
+.PHONY: all init clean

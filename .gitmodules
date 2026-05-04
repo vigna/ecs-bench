@@ -13,4 +13,3 @@
 	path = LearnedStaticFunction
 	url = git@github.com:vigna/LearnedStaticFunction.git
 	branch = main
-	fetchRecurseSubmodules = false
