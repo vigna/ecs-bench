@@ -792,6 +792,7 @@ def cmd_par_bench(args):
         burr_ok = ensure_burr_built(args.burr_dir, bits_list)
 
     # Build work list sorted by size, like cmd_bench.
+    # Only filter methods (non-bits-agnostic) make sense for par-bench.
     work = []
     for method_name in methods:
         cfg = METHODS[method_name]
@@ -802,6 +803,8 @@ def cmd_par_bench(args):
             print(f"Skipping {method_name} (BuRR not available)")
             continue
         if cfg["tool"] in ("csf", "comp-vfunc", "phast"):
+            continue
+        if cfg.get("bits_agnostic"):
             continue
 
         max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
