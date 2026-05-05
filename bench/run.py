@@ -1508,7 +1508,7 @@ def make_parser():
     pl = sub.add_parser("plot", help="Generate paper figures")
     pl.add_argument("--figure", default="all",
                     help=f"Figure preset, or 'all' (default): {', '.join(FIGURES)}")
-    pl.add_argument("--bits", default="even",
+    pl.add_argument("--bits", default="all",
                     help="Bit widths for figures")
     pl.add_argument("--max-log2", type=int, default=33)
     pl.add_argument("--output-dir", default="figs",

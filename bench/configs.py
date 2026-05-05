@@ -237,7 +237,7 @@ METHODS = {
         "bench_bin": "bench_vfunc",
         "bits_agnostic": True,
         "build_threads": DEFAULT_THREADS,
-        "max_log2": 33,
+        "max_log2": 32,
     },
     # -----------------------------------------------------------------
     # PHast+ (minimal perfect hash + array)
@@ -253,7 +253,7 @@ METHODS = {
         "tool": "phast",
         "label": "PHast+",
         "build_threads": DEFAULT_THREADS,
-        "max_log2": 33,
+        "max_log2": 32,
     },
     # -----------------------------------------------------------------
     # Monotone MMPHF methods
