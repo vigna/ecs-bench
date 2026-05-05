@@ -13,3 +13,6 @@
 	path = LearnedStaticFunction
 	url = git@github.com:vigna/LearnedStaticFunction.git
 	branch = main
+[submodule "MMPHF-Experiments"]
+	path = MMPHF-Experiments
+	url = https://github.com/ByteHamster/MMPHF-Experiments.git

@@ -1,5 +1,7 @@
 bench_csf
 ribbon_vlr
+bench_lemonhash
 results
 figs
 *.pdf
+build

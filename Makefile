@@ -21,13 +21,16 @@ OPTFLAGS = -O3 -DNDEBUG -march=native -fPIE
 LDFLAGS = $(BURR_VL)/sorter.o $(BURR_VL)/tlx/build/tlx/libtlx.a \
           -lpthread -ltbb -latomic
 
-all: bench_csf
+all: bench_csf bench_lemonhash
 
 # Initialize submodules without pulling LearnedStaticFunction's nested
 # tensorflow (4GB+).  Use this instead of git clone --recurse-submodules.
 init:
 	git submodule update --init --recursive BuRR BuRR-VL sux-rs
 	git submodule update --init LearnedStaticFunction
+	git submodule update --init MMPHF-Experiments
+	cd MMPHF-Experiments && git -c url.https://github.com/.insteadOf=git@github.com: submodule update --init cpp/extlib/LeMonHash
+	cd MMPHF-Experiments/cpp/extlib/LeMonHash && git submodule update --init --recursive
 
 # BuRR-VL dependencies: sorter object and tlx library
 $(BURR_VL)/sorter.o: $(BURR_VL)/sorter.cpp $(BURR_VL)/sorter.hpp
@@ -40,9 +43,14 @@ $(BURR_VL)/tlx/build/tlx/libtlx.a:
 bench_csf: $(BURR_VL)/sorter.o bench_csf.cpp $(BURR_VL)/tlx/build/tlx/libtlx.a
 	$(CXX) $(OPTFLAGS) $(CFLAGS) -o $@ bench_csf.cpp $(LDFLAGS)
 
+bench_lemonhash: bench_lemonhash.cpp
+	@mkdir -p build
+	cd build && cmake -DCMAKE_BUILD_TYPE=Release -G Ninja .. && ninja bench_lemonhash
+	cp build/bench_lemonhash $@
+
 clean:
-	rm -f bench_csf $(BURR_VL)/sorter.o
-	rm -rf $(BURR_VL)/tlx/build
+	rm -f bench_csf bench_lemonhash $(BURR_VL)/sorter.o
+	rm -rf $(BURR_VL)/tlx/build build
 	rm -f BuRR/bench[0-9]* BuRR/ribbon[0-9]* BuRR/debug[0-9]* \
 	      BuRR/parbench[0-9]* BuRR/parrun[0-9]* BuRR/pardbg[0-9]* \
 	      BuRR/sorter.o BuRR/tests

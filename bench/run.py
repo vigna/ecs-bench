@@ -91,7 +91,8 @@ def sux_target_dir(sux_dir):
     return Path(sux_dir) / "target"
 
 
-_PARSE_TOOL_MAP = {"csf": "burr", "comp-vfunc": "sux", "phast": "sux"}
+_PARSE_TOOL_MAP = {"csf": "burr", "comp-vfunc": "sux", "phast": "sux",
+                   "mmphf": "sux", "lemonhash": "sux"}
 
 
 def _parse_tool(tool):
@@ -262,6 +263,49 @@ def ensure_burr_built(burr_dir, bits_values):
             print(r.stderr, file=sys.stderr)
             sys.exit(f"BuRR make failed for RIBBON_BITS={bits}")
     return True
+
+
+def ensure_lemonhash_built():
+    """Ensure bench_lemonhash is built via the top-level Makefile."""
+    bench = Path(REPO_ROOT) / "bench_lemonhash"
+    if bench.exists():
+        return True
+
+    print("Building bench_lemonhash…")
+    r = subprocess.run(
+        ["make", "bench_lemonhash"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        print("WARNING: bench_lemonhash build failed, skipping LeMonHash")
+        return False
+    return True
+
+
+def ensure_mmphf_built(sux_dir):
+    """Ensure lcp_mmphf and bench_lcp_mmphf are built in sux-rs."""
+    target = sux_target_dir(sux_dir)
+    needed = [
+        target / "release" / "lcp_mmphf",
+        target / "release" / "examples" / "bench_lcp_mmphf",
+    ]
+    if all(p.exists() for p in needed):
+        return
+
+    sux = Path(sux_dir)
+    print(f"Building lcp_mmphf + bench_lcp_mmphf in {sux}…")
+    cmd = [
+        "cargo", "build",
+        "--profile", SUX_PROFILE,
+        "--features", SUX_FEATURES,
+        "--bin", "lcp_mmphf",
+        "--example", "bench_lcp_mmphf",
+    ]
+    r = subprocess.run(cmd, cwd=str(sux), capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        sys.exit(f"cargo build failed for lcp_mmphf (exit {r.returncode})")
 
 
 # =====================================================================
@@ -494,15 +538,22 @@ def cmd_bench(args):
     phast_needed = any(METHODS[m]["tool"] == "phast" for m in methods)
     burr_needed = any(METHODS[m]["tool"] == "burr" for m in methods)
     csf_needed = any(METHODS[m]["tool"] == "csf" for m in methods)
+    mmphf_needed = any(METHODS[m]["tool"] == "mmphf" for m in methods)
+    lemonhash_needed = any(METHODS[m]["tool"] == "lemonhash" for m in methods)
     burr_ok = True
     csf_ok = True
+    lemonhash_ok = True
 
     if sux_needed or comp_vfunc_needed or phast_needed:
         ensure_sux_built(args.sux_dir, need_comp_vfunc=comp_vfunc_needed)
+    if mmphf_needed:
+        ensure_mmphf_built(args.sux_dir)
     if burr_needed:
         burr_ok = ensure_burr_built(args.burr_dir, bits_list)
     if csf_needed:
         csf_ok = ensure_csf_built()
+    if lemonhash_needed:
+        lemonhash_ok = ensure_lemonhash_built()
 
     # Build the work list: (log2_n, method_name, bits) triples,
     # ordered by size first so that if a method OOMs we still have
@@ -517,9 +568,13 @@ def cmd_bench(args):
         if cfg["tool"] == "csf" and not csf_ok:
             print(f"Skipping {method_name} (bench_csf not available)")
             continue
+        if cfg["tool"] == "lemonhash" and not lemonhash_ok:
+            print(f"Skipping {method_name} (bench_lemonhash not available)")
+            continue
 
         max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
-        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in ("csf", "comp-vfunc", "phast"))
+        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in (
+            "csf", "comp-vfunc", "phast", "mmphf", "lemonhash"))
         method_bits = [0] if bits_agnostic else bits_list
 
         for bits in method_bits:
@@ -550,6 +605,12 @@ def cmd_bench(args):
         elif cfg["tool"] == "phast":
             _bench_phast(cfg, method_name, n, log2_n,
                          rdir, args)
+        elif cfg["tool"] == "mmphf":
+            _bench_mmphf(cfg, method_name, n, log2_n,
+                         rdir, args)
+        elif cfg["tool"] == "lemonhash":
+            _bench_lemonhash(cfg, method_name, n, log2_n,
+                             rdir, args)
         else:
             _bench_sux(cfg, method_name, n, bits, log2_n,
                        rdir, args)
@@ -673,6 +734,84 @@ def _bench_phast(cfg, method_name, n, log2_n, rdir, args):
 
     output = result.stderr
     (rdir / f"bench.{n}.0.err").write_text(output)
+
+
+def _bench_mmphf(cfg, method_name, n, log2_n, rdir, args):
+    """Run a LcpMmphf/Lcp2Mmphf benchmark: build, then query.
+
+    Build:  lcp_mmphf -n <N> --unaligned [--threads 1] [-2] <outfile>
+    Query:  bench_lcp_mmphf <n> <outfile> --unaligned [-2] --repeats 5
+    """
+    target = sux_target_dir(args.sux_dir)
+    ddir = data_dir(args.results_dir, method_name)
+    outfile = ddir / f"func.{n}.bin"
+
+    # --- Build (unpinned) ---
+    cmd = [str(target / "release" / "lcp_mmphf")]
+    cmd += ["-n", str(n)]
+    cmd += ["--unaligned"]
+    cmd += ["--threads", "1"]
+    if cfg.get("variant") == "lcp2":
+        cmd += ["-2"]
+    cmd += [str(outfile)]
+
+    print(f"  bench {method_name} n=2^{log2_n}")
+    result = run_cmd(cmd, dry_run=args.dry_run)
+
+    # --- Query (pinned) ---
+    qcmd = [str(target / "release" / "examples" / "bench_lcp_mmphf")]
+    qcmd += [str(n), str(outfile)]
+    qcmd += ["--unaligned"]
+    if cfg.get("variant") == "lcp2":
+        qcmd += ["-2"]
+    qcmd += ["--repeats", "5"]
+    qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
+
+    if args.dry_run:
+        return
+
+    if result is None:
+        return
+
+    build_output = result.stderr
+    (rdir / f"bench.{n}.0.err").write_text(build_output)
+
+    if outfile.exists():
+        (rdir / f"bench.{n}.0.size").write_text(
+            str(outfile.stat().st_size))
+
+    if qr is not None:
+        with open(rdir / f"bench.{n}.0.err", "a") as f:
+            f.write("\n--- query ---\n")
+            f.write(qr.stderr)
+
+    # --- Clean up ---
+    if not args.keep_data and outfile.exists():
+        outfile.unlink()
+
+
+def _bench_lemonhash(cfg, method_name, n, log2_n, rdir, args):
+    """Run a LeMonHash benchmark: build and query in one invocation.
+
+    bench_lemonhash <n> <query_keys> <repeats>
+    Output goes to stderr.
+    """
+    cmd = [str(Path(REPO_ROOT) / "bench_lemonhash")]
+    qkeys = cfg.get("query_keys", QUERY_KEYS)
+    cmd += [str(n), str(qkeys), "5"]
+
+    print(f"  bench {method_name} n=2^{log2_n}")
+    result = run_cmd(cmd, pin=args.pin, dry_run=args.dry_run)
+
+    if args.dry_run or result is None:
+        return
+
+    output = result.stderr
+    (rdir / f"bench.{n}.0.err").write_text(output)
+
+    mem_size = parse_burr_size(output)
+    if mem_size is not None:
+        (rdir / f"bench.{n}.0.size").write_text(str(mem_size))
 
 
 def _bench_csf(cfg, method_name, n, log2_n, rdir, args):
@@ -802,7 +941,7 @@ def cmd_par_bench(args):
         if cfg["tool"] == "burr" and not burr_ok:
             print(f"Skipping {method_name} (BuRR not available)")
             continue
-        if cfg["tool"] in ("csf", "comp-vfunc", "phast"):
+        if cfg["tool"] in ("csf", "comp-vfunc", "phast", "mmphf", "lemonhash"):
             continue
         if cfg.get("bits_agnostic"):
             continue
@@ -947,7 +1086,7 @@ def cmd_report(args):
 
         max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
         tool_for_parse = _parse_tool(cfg["tool"])
-        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in ("csf", "comp-vfunc", "phast"))
+        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in ("csf", "comp-vfunc", "phast", "mmphf", "lemonhash"))
         method_bits = [0] if bits_agnostic else bits_list
 
         entropy = distribution_entropy(cfg.get("distribution"))
@@ -1052,7 +1191,7 @@ def _plot_one(figure_name, args, plt):
     col = fig_cfg["column"]
 
     all_agnostic = all(
-        METHODS[m].get("bits_agnostic", METHODS[m]["tool"] in ("csf", "comp-vfunc", "phast"))
+        METHODS[m].get("bits_agnostic", METHODS[m]["tool"] in ("csf", "comp-vfunc", "phast", "mmphf", "lemonhash"))
         for m in fig_cfg["methods"] if m in METHODS
     )
     if all_agnostic:
@@ -1164,7 +1303,7 @@ def cmd_status(args):
         done_bench, done_pq = 0, 0
         total = 0
         tool_for_parse = _parse_tool(cfg["tool"])
-        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in ("csf", "comp-vfunc", "phast"))
+        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in ("csf", "comp-vfunc", "phast", "mmphf", "lemonhash"))
         method_bits = [0] if bits_agnostic else bits_list
 
         for bits in method_bits:

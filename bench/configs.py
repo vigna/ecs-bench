@@ -255,6 +255,40 @@ METHODS = {
         "build_threads": DEFAULT_THREADS,
         "max_log2": 33,
     },
+    # -----------------------------------------------------------------
+    # Monotone MMPHF methods
+    # -----------------------------------------------------------------
+    #
+    # All use sorted random 64-bit keys (same generation algorithm).
+    # Bits-agnostic (bits/key is a result metric).
+    #
+    # LcpMmphf/Lcp2Mmphf: use bench_lcp_mmphf from sux-rs.
+    #   Run:  bench_lcp_mmphf <n> <query_keys> <threads>
+    #
+    # LeMonHash: uses bench_lemonhash (C++, cmake-built).
+    #   Run:  bench_lemonhash <n> <query_keys> <repeats>
+    "LcpMmphf": {
+        "tool": "mmphf",
+        "label": "LcpMmphf",
+        "variant": "lcp",
+        "build_threads": 1,
+        "query_keys": 10_000_000,
+        "max_log2": 30,
+    },
+    "Lcp2Mmphf": {
+        "tool": "mmphf",
+        "label": "Lcp2Mmphf",
+        "variant": "lcp2",
+        "build_threads": 1,
+        "query_keys": 10_000_000,
+        "max_log2": 30,
+    },
+    "LeMonHash": {
+        "tool": "lemonhash",
+        "label": "LeMonHash",
+        "query_keys": 10_000_000,
+        "max_log2": 30,
+    },
 }
 
 
@@ -341,6 +375,20 @@ FIGURES = {
     "pthash-query": {
         "title": "PHast+ vs VFunc Queries",
         "methods": ["Phast", "VFunc"],
+        "column": "query_min",
+        "ylabel": "ns/key",
+    },
+    # --- Monotone MMPHF comparison ---
+    # Bits-agnostic: mmphf-build.pdf, mmphf-query.pdf.
+    "mmphf-build": {
+        "title": "Monotone MMPHF Construction",
+        "methods": ["LcpMmphf", "Lcp2Mmphf", "LeMonHash"],
+        "column": "constr_ns",
+        "ylabel": "ns/key",
+    },
+    "mmphf-query": {
+        "title": "Monotone MMPHF Queries",
+        "methods": ["LcpMmphf", "Lcp2Mmphf", "LeMonHash"],
         "column": "query_min",
         "ylabel": "ns/key",
     },
