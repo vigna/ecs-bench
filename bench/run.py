@@ -504,14 +504,11 @@ def run_cmd(cmd, pin=None, dry_run=False):
 
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        # Print diagnostic info but don't abort: let the loop continue
-        # to the next (n, bits) pair.
         print(f"  FAILED (exit {r.returncode}): {shlex.join(cmd)}", file=sys.stderr)
-        if r.stderr:
-            # Show first few lines of stderr to help diagnose the failure.
-            for line in r.stderr.strip().splitlines()[:10]:
-                print(f"    {line}", file=sys.stderr)
-        return None
+        for stream in (r.stderr, r.stdout):
+            if stream:
+                for line in stream.strip().splitlines():
+                    print(f"    {line}", file=sys.stderr)
     return r
 
 
@@ -645,12 +642,15 @@ def _bench_burr(cfg, method_name, n, bits, log2_n, rdir, args):
     qr = None
     if not cfg.get("no_queries"):
         qcmd = burr_query_cmd(cfg, n, bits, outfile, args)
-        qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
+        if args.dry_run or result.returncode == 0:
+            qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
 
     if args.dry_run:
         return
 
-    if result is None:
+    if result.returncode != 0:
+        (rdir / f"bench.{n}.{bits}.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
         return
 
     build_output = result.stdout
@@ -660,7 +660,7 @@ def _bench_burr(cfg, method_name, n, bits, log2_n, rdir, args):
     if mem_size is not None:
         (rdir / f"bench.{n}.{bits}.size").write_text(str(mem_size))
 
-    if qr is not None:
+    if qr is not None and qr.returncode == 0:
         with open(rdir / f"bench.{n}.{bits}.err", "a") as f:
             f.write("\n--- query ---\n")
             f.write(qr.stdout)
@@ -684,24 +684,28 @@ def _bench_comp_vfunc(cfg, method_name, n, log2_n, rdir, args):
     print(f"  bench {method_name} n=2^{log2_n}")
     result = run_cmd(cmd, dry_run=args.dry_run)
 
-    # --- Query (pinned) ---
-    qcmd = comp_vfunc_query_cmd(cfg, n, outfile, args)
-    qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
+    # --- Query (pinned, only if build succeeded) ---
+    qr = None
+    if args.dry_run or result.returncode == 0:
+        qcmd = comp_vfunc_query_cmd(cfg, n, outfile, args)
+        qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
 
     if args.dry_run:
         return
 
-    if result is None:
+    build_output = result.stderr
+    if result.returncode != 0:
+        (rdir / f"bench.{n}.0.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
         return
 
-    build_output = result.stderr
     (rdir / f"bench.{n}.0.err").write_text(build_output)
 
     if outfile.exists():
         (rdir / f"bench.{n}.0.size").write_text(
             str(outfile.stat().st_size))
 
-    if qr is not None:
+    if qr is not None and qr.returncode == 0:
         with open(rdir / f"bench.{n}.0.err", "a") as f:
             f.write("\n--- query ---\n")
             f.write(qr.stderr)
@@ -729,11 +733,15 @@ def _bench_phast(cfg, method_name, n, log2_n, rdir, args):
     print(f"  bench {method_name} n=2^{log2_n}")
     result = run_cmd(cmd, pin=args.pin, dry_run=args.dry_run)
 
-    if args.dry_run or result is None:
+    if args.dry_run:
         return
 
-    output = result.stderr
-    (rdir / f"bench.{n}.0.err").write_text(output)
+    if result.returncode != 0:
+        (rdir / f"bench.{n}.0.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
+        return
+
+    (rdir / f"bench.{n}.0.err").write_text(result.stderr)
 
 
 def _bench_mmphf(cfg, method_name, n, log2_n, rdir, args):
@@ -758,7 +766,7 @@ def _bench_mmphf(cfg, method_name, n, log2_n, rdir, args):
     print(f"  bench {method_name} n=2^{log2_n}")
     result = run_cmd(cmd, dry_run=args.dry_run)
 
-    # --- Query (pinned) ---
+    # --- Query (pinned, only if build succeeded) ---
     qkeys = cfg.get("query_keys", QUERY_KEYS)
     qcmd = [str(target / "release" / "examples" / "bench_lcp_mmphf")]
     qcmd += [str(qkeys), str(outfile)]
@@ -766,22 +774,26 @@ def _bench_mmphf(cfg, method_name, n, log2_n, rdir, args):
     if cfg.get("variant") == "lcp2":
         qcmd += ["-2"]
     qcmd += ["--repeats", "5"]
-    qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
+    qr = None
+    if args.dry_run or result.returncode == 0:
+        qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
 
     if args.dry_run:
         return
 
-    if result is None:
+    build_output = result.stderr
+    if result.returncode != 0:
+        (rdir / f"bench.{n}.0.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
         return
 
-    build_output = result.stderr
     (rdir / f"bench.{n}.0.err").write_text(build_output)
 
     if outfile.exists():
         (rdir / f"bench.{n}.0.size").write_text(
             str(outfile.stat().st_size))
 
-    if qr is not None:
+    if qr is not None and qr.returncode == 0:
         with open(rdir / f"bench.{n}.0.err", "a") as f:
             f.write("\n--- query ---\n")
             f.write(qr.stderr)
@@ -804,7 +816,12 @@ def _bench_lemonhash(cfg, method_name, n, log2_n, rdir, args):
     print(f"  bench {method_name} n=2^{log2_n}")
     result = run_cmd(cmd, pin=args.pin, dry_run=args.dry_run)
 
-    if args.dry_run or result is None:
+    if args.dry_run:
+        return
+
+    if result.returncode != 0:
+        (rdir / f"bench.{n}.0.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
         return
 
     output = result.stderr
@@ -829,24 +846,28 @@ def _bench_csf(cfg, method_name, n, log2_n, rdir, args):
     print(f"  bench {method_name} n=2^{log2_n}")
     result = run_cmd(cmd, dry_run=args.dry_run)
 
-    # --- Query (pinned) ---
-    qcmd = csf_query_cmd(cfg, n, outfile)
-    qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
+    # --- Query (pinned, only if build succeeded) ---
+    qr = None
+    if args.dry_run or result.returncode == 0:
+        qcmd = csf_query_cmd(cfg, n, outfile)
+        qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
 
     if args.dry_run:
         return
 
-    if result is None:
+    build_output = result.stdout
+    if result.returncode != 0:
+        (rdir / f"bench.{n}.0.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
         return
 
-    build_output = result.stdout
     (rdir / f"bench.{n}.0.err").write_text(build_output)
 
     mem_size = parse_burr_size(build_output)
     if mem_size is not None:
         (rdir / f"bench.{n}.0.size").write_text(str(mem_size))
 
-    if qr is not None:
+    if qr is not None and qr.returncode == 0:
         with open(rdir / f"bench.{n}.0.err", "a") as f:
             f.write("\n--- query ---\n")
             f.write(qr.stdout)
@@ -871,26 +892,29 @@ def _bench_sux(cfg, method_name, n, bits, log2_n, rdir, args):
     print(f"  bench {method_name} n=2^{log2_n}{bits_str}")
     result = run_cmd(cmd, dry_run=args.dry_run)
 
-    # --- Query (pinned) ---
+    # --- Query (pinned, only if build succeeded) ---
     qr = None
     if not cfg.get("no_queries"):
         qcmd = sux_query_cmd(cfg, n, bits, outfile, args)
-        qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
+        if args.dry_run or result.returncode == 0:
+            qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
 
     if args.dry_run:
         return
 
-    if result is None:
+    build_output = result.stderr
+    if result.returncode != 0:
+        (rdir / f"bench.{n}.{bits}.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
         return
 
-    build_output = result.stderr
     (rdir / f"bench.{n}.{bits}.err").write_text(build_output)
 
     if outfile.exists():
         (rdir / f"bench.{n}.{bits}.size").write_text(
             str(outfile.stat().st_size))
 
-    if qr is not None:
+    if qr is not None and qr.returncode == 0:
         with open(rdir / f"bench.{n}.{bits}.err", "a") as f:
             f.write("\n--- query ---\n")
             f.write(qr.stderr)
@@ -983,7 +1007,7 @@ def cmd_par_bench(args):
         print(f"  par-bench {method_name} n=2^{log2_n} bits={bits}"
               f" (build)")
         br = run_cmd(build_cmd, dry_run=args.dry_run)
-        if br is None and not args.dry_run:
+        if not args.dry_run and br.returncode != 0:
             continue
 
         if args.dry_run:
@@ -1371,17 +1395,19 @@ TABLES = {
         "constr_col": "constr_ns",
         "query_col": "query_min",
     },
+    "mmphf": {
+        "methods": [
+            ("LcpMmphf", "LcpMmphf"),
+            ("Lcp2Mmphf", "Lcp2Mmphf"),
+            ("LeMonHash", "LeMonHash"),
+        ],
+        "sizes": [1 << 20, 1 << 31],
+    },
 }
 
 
-def cmd_table(args):
-    """Print LaTeX tables for the paper."""
-    if args.table not in TABLES:
-        sys.exit(f"Unknown table: {args.table}\n"
-                 f"Available: {', '.join(TABLES)}")
-
-    tbl = TABLES[args.table]
-
+def _table_filter(tbl, args):
+    """Render the 'filter' table: one table per size, bit widths as columns."""
     for n in tbl["sizes"]:
         log2_n = n.bit_length() - 1
         bits_order = tbl["bits_order"]
@@ -1440,6 +1466,84 @@ def cmd_table(args):
         print(r"\bottomrule")
         print(r"\end{tabular}")
         print()
+
+
+def _table_mmphf(tbl, args):
+    """Render the 'mmphf' table: sizes as column groups, each with constr/bpk/query."""
+    sizes = tbl["sizes"]
+    nsizes = len(sizes)
+    cols_per_size = 3  # construction, bits/key, query
+
+    # Column spec: label + 3 columns per size, separated by ||
+    colspec = "l" + "||".join(["rrr"] * nsizes)
+    print(r"\begin{tabular}{" + colspec + "}")
+    print(r"\toprule")
+
+    # Header row 1: size groups
+    hdr1 = ""
+    for n in sizes:
+        log2_n = n.bit_length() - 1
+        hdr1 += f" & \\multicolumn{{{cols_per_size}}}{{c}}{{$n = 2^{{{log2_n}}}$}}"
+    print(hdr1 + r" \\")
+
+    # Header row 2: sub-column labels
+    sub_hdr = " & Constr. & Bits/key & Query" * nsizes
+    print(sub_hdr + r" \\")
+    print(r"\midrule")
+
+    # Data rows
+    for method_name, label in tbl["methods"]:
+        if method_name not in METHODS:
+            continue
+        cfg = METHODS[method_name]
+        rdir = Path(args.results_dir) / method_name
+        tool_for_parse = _parse_tool(cfg["tool"])
+
+        row = label
+        for n in sizes:
+            bench_err = rdir / f"bench.{n}.0.err"
+            size_file = rdir / f"bench.{n}.0.size"
+
+            constr_val = ""
+            bpk_val = ""
+            query_val = ""
+
+            if bench_err.exists():
+                text = bench_err.read_text()
+                bd = parse_build(text, tool_for_parse)
+                qd = parse_query(text, tool_for_parse)
+                v = bd.get("constr_ns")
+                if v is not None:
+                    constr_val = f"{v:.1f}"
+                v = qd.get("query_min")
+                if v is not None:
+                    query_val = f"{v:.1f}"
+
+            if size_file.exists():
+                file_bytes = int(size_file.read_text().strip())
+                bpk_val = f"{file_bytes * 8.0 / n:.2f}"
+
+            row += f" & {constr_val} & {bpk_val} & {query_val}"
+
+        row += r" \\"
+        print(row)
+
+    print(r"\bottomrule")
+    print(r"\end{tabular}")
+
+
+def cmd_table(args):
+    """Print LaTeX tables for the paper."""
+    if args.table not in TABLES:
+        sys.exit(f"Unknown table: {args.table}\n"
+                 f"Available: {', '.join(TABLES)}")
+
+    tbl = TABLES[args.table]
+
+    if args.table == "mmphf":
+        _table_mmphf(tbl, args)
+    else:
+        _table_filter(tbl, args)
 
 
 # =====================================================================
@@ -1517,7 +1621,7 @@ def make_parser():
     # --- table ---
     tb = sub.add_parser("table", help="Print LaTeX tables")
     tb.add_argument("--table", default="filter",
-                    help=f"Table preset (default: filter)")
+                    help=f"Table preset (default: filter). Available: {', '.join(TABLES)}")
     tb.add_argument("--results-dir", default=argparse.SUPPRESS)
 
     # --- status ---
