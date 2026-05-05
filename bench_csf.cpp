@@ -1,18 +1,10 @@
 // Benchmark for compressed static functions: BuRR-VL with Shannon-Fano
 // or Huffman coding, comparable to sux-rs CompVFunc.
 //
-// Uses the FilteredLSFStorage architecture from the LearnedStaticFunction
-// paper: two BuRR-VL ribbon structures (filter + correction) with a
-// prefix-free code (Shannon-Fano or Huffman) driving the encoding.
-//
 // Value distributions:
 //   --geometric   trailing zeros of random uint64 (highly skewed)
 //   --zipf K      Zipf(1) over [0..K)
 //   --uniform K   uniform over [0..K)
-//
-// BuRR-VL configuration matches the LSF paper:
-//   ribbon width 128, result bits 1, two-bit threshold, interleaved,
-//   depth 2, slotsPerItem 0.96, bucket size 128, uint64_t keys.
 
 #include "ribbon.hpp"
 #include "rocksdb/stop_watch.h"
@@ -20,8 +12,7 @@
 #include <tlx/cmdline_parser.hpp>
 #include <tlx/logger.hpp>
 
-// Coding infrastructure from LearnedStaticFunction
-#include "lsf/filter_coding.hpp"
+#include "lsf/filtered_lsf_storage.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -34,87 +25,31 @@
 #include <span>
 #include <vector>
 
-using namespace ribbon;
-
-// BuRR-VL configuration matching LSF paper exactly.
-struct BuRRConfig : public RConfig<128, 1, ThreshMode::twobit, false, true,
-                                   false, 0, uint64_t> {
-  static constexpr bool kUseVLR = true;
-  static constexpr Index kBucketSize = 128;
-};
-
-static constexpr size_t recDepth = 2;
-static constexpr float slotsPerItem = 0.96;
-
 // =====================================================================
-//  Compressed static function: two BuRR-VL ribbons + prefix-free code
+//  Compressed static function: thin wrapper around FilteredLSFStorage
+//  adding stored probabilities and serialization.
 // =====================================================================
 
 template <typename Coding> class CompressedStaticFunction {
-  ribbon_filter<recDepth, BuRRConfig> correctionVLSF;
-  ribbon_filter<recDepth, BuRRConfig> filterVLSF;
-  Coding coder;
+  lsf::FilteredLSFStorage<Coding> storage;
   std::vector<float> probabilities;
 
 public:
-  CompressedStaticFunction() {}
-
-  // Build from (key, value) pairs with a known global frequency table.
   void build(size_t n, const uint64_t *keys, const uint32_t *values,
              size_t classes_count, const std::vector<float> &freqs) {
-    IMPORT_RIBBON_CONFIG(BuRRConfig);
-
     probabilities.assign(freqs.begin(), freqs.end());
     std::span<float> probs(probabilities);
-    coder = Coding(classes_count, probs);
-
-    // Phase 1: encode filter bits
-    auto inputFilter = std::make_unique<std::pair<Key, ResultRowVLR>[]>(n);
-    size_t maxlenfilter = 0;
-    for (size_t i = 0; i < n; ++i) {
-      auto [code, filterLength, bitsSet] =
-          coder.encode_once_filter(probs, values[i]);
-      inputFilter[i].first = keys[i];
-      if (filterLength > maxlenfilter)
-        maxlenfilter = filterLength;
-      inputFilter[i].second =
-          static_cast<uint64_t>(code) | (uint64_t(1) << filterLength);
-    }
-
-    filterVLSF =
-        ribbon_filter<recDepth, BuRRConfig>(slotsPerItem, 42, maxlenfilter);
-    filterVLSF.AddRange(inputFilter.get(), inputFilter.get() + n, true);
-    filterVLSF.BackSubst();
-
-    // Phase 2: encode correction bits using the filter output
-    auto input = std::make_unique<std::pair<Key, ResultRowVLR>[]>(n);
-    size_t maxlen = 0;
-    for (size_t i = 0; i < n; ++i) {
-      uint64_t filterVal = filterVLSF.QueryRetrieval(keys[i]);
-      auto [code, length] =
-          coder.encode_once_corrected_code(probs, values[i], filterVal);
-      input[i].first = keys[i];
-      if (length > maxlen)
-        maxlen = length;
-      input[i].second = static_cast<uint64_t>(code) | (uint64_t(1) << length);
-    }
-
-    correctionVLSF =
-        ribbon_filter<recDepth, BuRRConfig>(slotsPerItem, 42, maxlen);
-    correctionVLSF.AddRange(input.get(), input.get() + n);
-    correctionVLSF.BackSubst();
+    storage.build(n, classes_count, [&](size_t i) {
+      return std::make_tuple(keys[i], static_cast<uint64_t>(values[i]), probs);
+    });
   }
 
   uint64_t query(uint64_t key) {
-    uint64_t corrected_code = correctionVLSF.QueryRetrieval(key);
-    uint64_t filterCode = filterVLSF.QueryRetrieval(key);
     std::span<float> probs(probabilities);
-    return coder.decode_once(probs, corrected_code, filterCode);
+    return storage.query(key, probs);
   }
 
-  size_t size_in_bytes() const {
-    return filterVLSF.Size() + correctionVLSF.Size();
-  }
+  size_t size_in_bytes() const { return storage.size_in_bytes(); }
 
   void serialize(const std::string &filename) {
     std::ofstream os(filename, std::ios::binary);
@@ -122,8 +57,8 @@ public:
     os.write(reinterpret_cast<const char *>(&nc), sizeof(nc));
     os.write(reinterpret_cast<const char *>(probabilities.data()),
              nc * sizeof(float));
-    filterVLSF.Serialize(os);
-    correctionVLSF.Serialize(os);
+    storage.filterVLSF.Serialize(os);
+    storage.correctionVLSF.Serialize(os);
   }
 
   void deserialize(const std::string &filename) {
@@ -133,9 +68,9 @@ public:
     probabilities.resize(nc);
     is.read(reinterpret_cast<char *>(probabilities.data()), nc * sizeof(float));
     std::span<float> probs(probabilities);
-    coder = Coding(nc, probs);
-    filterVLSF.Deserialize(is);
-    correctionVLSF.Deserialize(is);
+    storage.coder = Coding(nc, probs);
+    storage.filterVLSF.Deserialize(is);
+    storage.correctionVLSF.Deserialize(is);
   }
 };
 
@@ -262,7 +197,6 @@ void run_bench(size_t n, const uint64_t *keys, const uint32_t *values,
 
   const uint64_t N = 10000000;
   const int REPEATS = 5;
-  bool found = false;
 
   std::vector<double> timings;
   for (int k = 0; k < REPEATS; k++) {
