@@ -759,8 +759,9 @@ def _bench_mmphf(cfg, method_name, n, log2_n, rdir, args):
     result = run_cmd(cmd, dry_run=args.dry_run)
 
     # --- Query (pinned) ---
+    qkeys = cfg.get("query_keys", QUERY_KEYS)
     qcmd = [str(target / "release" / "examples" / "bench_lcp_mmphf")]
-    qcmd += [str(n), str(outfile)]
+    qcmd += [str(qkeys), str(outfile)]
     qcmd += ["--unaligned"]
     if cfg.get("variant") == "lcp2":
         qcmd += ["-2"]
