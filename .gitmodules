@@ -15,4 +15,4 @@
 	branch = main
 [submodule "MMPHF-Experiments"]
 	path = MMPHF-Experiments
-	url = https://github.com/ByteHamster/MMPHF-Experiments.git
+	url = git@github.com:vigna/MMPHF-Experiments.git
