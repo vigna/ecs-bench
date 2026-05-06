@@ -431,6 +431,7 @@ def comp_vfunc_build_cmd(cfg, n, outfile, args):
     cmd += ["-n", str(n)]
     cmd += cfg["distribution"]
     cmd += ["--shard-edge", cfg["shard_edge"]]
+    cmd += ["--huffman-entropy-threshold", "1"]
 
     threads = cfg.get("build_threads")
     if args.threads is not None:
@@ -1403,6 +1404,14 @@ TABLES = {
         ],
         "sizes": [1 << 20, 1 << 31],
     },
+    "comp": {
+        "rows": [
+            ("CompVFunc", ["CompVFunc-Geo", "CompVFunc-Zipf", "CompVFunc-Uni256"]),
+            ("CSF", ["CSF-Geo", "CSF-Zipf", "CSF-Uni256"]),
+        ],
+        "dist_labels": ["Geometric", "Zipf", "Uniform"],
+        "sizes": [1 << 20, 1 << 29],
+    },
 }
 
 
@@ -1532,6 +1541,70 @@ def _table_mmphf(tbl, args):
     print(r"\end{tabular}")
 
 
+def _table_comp(tbl, args):
+    """Render the 'comp' table: distributions as column groups, constr/query each."""
+    dist_labels = tbl["dist_labels"]
+    ndists = len(dist_labels)
+
+    for n in tbl["sizes"]:
+        log2_n = n.bit_length() - 1
+
+        colspec = "l" + "||rrr" * ndists
+        print(f"% n = 2^{{{log2_n}}}")
+        print(r"\begin{tabular}{" + colspec + "}")
+        print(r"\toprule")
+
+        hdr1 = ""
+        for i, dl in enumerate(dist_labels):
+            sep = "||" if i < ndists - 1 else ""
+            hdr1 += f" & \\multicolumn{{3}}{{c{sep}}}{{{dl}}}"
+        print(hdr1 + r" \\")
+
+        sub_hdr = (" & Constr. & Query & b/key") * ndists
+        print(sub_hdr + r" \\")
+        print(r"\midrule")
+
+        for label, method_names in tbl["rows"]:
+            row = label
+            for method_name in method_names:
+                if method_name not in METHODS:
+                    row += " & & &"
+                    continue
+                cfg = METHODS[method_name]
+                rdir = Path(args.results_dir) / method_name
+                tool_for_parse = _parse_tool(cfg["tool"])
+
+                bench_err = rdir / f"bench.{n}.0.err"
+                size_file = rdir / f"bench.{n}.0.size"
+                constr_val = ""
+                bpk_val = ""
+                query_val = ""
+
+                if bench_err.exists():
+                    text = bench_err.read_text()
+                    bd = parse_build(text, tool_for_parse)
+                    qd = parse_query(text, tool_for_parse)
+                    v = bd.get("constr_ns")
+                    if v is not None:
+                        constr_val = f"{v:.1f}"
+                    v = qd.get("query_min")
+                    if v is not None:
+                        query_val = f"{v:.1f}"
+
+                if size_file.exists():
+                    file_bytes = int(size_file.read_text().strip())
+                    bpk_val = f"{file_bytes * 8.0 / n:.2f}"
+
+                row += f" & {constr_val} & {query_val} & {bpk_val}"
+
+            row += r" \\"
+            print(row)
+
+        print(r"\bottomrule")
+        print(r"\end{tabular}")
+        print()
+
+
 def cmd_table(args):
     """Print LaTeX tables for the paper."""
     if args.table not in TABLES:
@@ -1542,6 +1615,8 @@ def cmd_table(args):
 
     if args.table == "mmphf":
         _table_mmphf(tbl, args)
+    elif args.table == "comp":
+        _table_comp(tbl, args)
     else:
         _table_filter(tbl, args)
 
