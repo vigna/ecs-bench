@@ -1054,19 +1054,24 @@ def cmd_par_bench(args):
             print(f"  WARNING: parallel returned {r.returncode}",
                   file=sys.stderr)
 
-        # Aggregate: worst-case Max across all instances.
-        worst_max = 0.0
+        # Aggregate: median of per-instance median times.
+        medians = []
         for i in range(args.jobs):
             ifile = instance_dir / f"{i}.err"
             if not ifile.exists():
                 continue
             qdata = parse_query(ifile.read_text(), cfg["tool"])
-            if "query_max" in qdata:
-                worst_max = max(worst_max, qdata["query_max"])
+            if "query_median" in qdata:
+                medians.append(qdata["query_median"])
+        medians.sort()
+        if medians:
+            med = medians[len(medians) // 2]
+        else:
+            med = 0.0
 
         agg_err.write_text(
-            f"Min: {worst_max} Median: {worst_max} "
-            f"Max: {worst_max} Average: {worst_max}\n"
+            f"Min: {med} Median: {med} "
+            f"Max: {med} Average: {med}\n"
         )
 
         # --- Clean up ---
@@ -1384,17 +1389,20 @@ def cmd_clean(args):
 
 TABLES = {
     "filter": {
-        "methods": [
-            ("BuRR", "BuRR"),
-            ("FuseLge3Shards", "VFunc"),
-            ("Mwhc3-seq", "MWHC"),
-            ("Fuse3NoShards64", "Fuse(64)"),
-            ("Fuse3NoShards128", "Fuse(128)"),
+        "rows": [
+            ("BuRR", {"constr_seq": "BuRR-seq", "constr_par": "BuRR",
+                      "query_seq": "BuRR", "query_par": "BuRR"}),
+            ("VFunc", {"constr_seq": "FuseLge3Shards-seq", "constr_par": "FuseLge3Shards",
+                       "query_seq": "FuseLge3Shards", "query_par": "FuseLge3Shards"}),
+            ("MWHC", {"constr_seq": None, "constr_par": "Mwhc3",
+                      "query_seq": "Mwhc3", "query_par": "Mwhc3"}),
+            ("Fuse(64)", {"constr_seq": "Fuse3NoShards64", "constr_par": None,
+                          "query_seq": "Fuse3NoShards64", "query_par": "Fuse3NoShards64"}),
+            ("Fuse(128)", {"constr_seq": "Fuse3NoShards128", "constr_par": None,
+                           "query_seq": "Fuse3NoShards128", "query_par": "Fuse3NoShards128"}),
         ],
         "bits_order": [8, 16, 32, 9, 17, 33],
         "sizes": [1 << 20, 1 << 30],
-        "constr_col": "constr_ns",
-        "query_col": "query_min",
     },
     "mmphf": {
         "methods": [
@@ -1407,7 +1415,7 @@ TABLES = {
     "comp": {
         "rows": [
             ("CompVFunc", ["CompVFunc-Geo", "CompVFunc-Zipf", "CompVFunc-Uni256"]),
-            ("CSF", ["CSF-Geo", "CSF-Zipf", "CSF-Uni256"]),
+            ("BuRR-CSF", ["CSF-Geo", "CSF-Zipf", "CSF-Uni256"]),
         ],
         "dist_labels": ["Geometric", "Zipf", "Uniform"],
         "sizes": [1 << 20, 1 << 29],
@@ -1415,66 +1423,90 @@ TABLES = {
 }
 
 
+def _filter_constr_row(label, variants, bits_order, n, args):
+    """Build one construction row (sequential | parallel, integer ns/key)."""
+    row = label
+    for mode in ("constr_seq", "constr_par"):
+        method_name = variants[mode]
+        if method_name is None:
+            row += " & ---" * len(bits_order)
+            continue
+        cfg = METHODS.get(method_name)
+        if cfg is None:
+            row += " &" * len(bits_order)
+            continue
+        rdir = Path(args.results_dir) / method_name
+        tool_for_parse = _parse_tool(cfg["tool"])
+        for bits in bits_order:
+            bench_err = rdir / f"bench.{n}.{bits}.err"
+            val = ""
+            if bench_err.exists():
+                d = parse_build(bench_err.read_text(), tool_for_parse)
+                v = d.get("constr_ns")
+                if v is not None:
+                    val = f"{v:.0f}"
+            row += f" & {val}"
+    return row + r" \\"
+
+
+def _filter_query_row(label, variants, bits_order, n, args):
+    """Build one query row (sequential from bench.err, parallel from parbench.err)."""
+    row = label
+    for mode in ("query_seq", "query_par"):
+        method_name = variants[mode]
+        if method_name is None:
+            row += " & ---" * len(bits_order)
+            continue
+        cfg = METHODS.get(method_name)
+        if cfg is None:
+            row += " &" * len(bits_order)
+            continue
+        rdir = Path(args.results_dir) / method_name
+        tool_for_parse = _parse_tool(cfg["tool"])
+        prefix = "parbench" if mode == "query_par" else "bench"
+        for bits in bits_order:
+            bench_err = rdir / f"{prefix}.{n}.{bits}.err"
+            val = ""
+            if bench_err.exists():
+                d = parse_query(bench_err.read_text(), tool_for_parse)
+                v = d.get("query_min")
+                if v is not None:
+                    val = f"{v:.1f}"
+            row += f" & {val}"
+    return row + r" \\"
+
+
 def _table_filter(tbl, args):
-    """Render the 'filter' table: one table per size, bit widths as columns."""
+    """Render filter tables: one construction table and one query table per size."""
+    bits_order = tbl["bits_order"]
+    ncols = len(bits_order)
+    colspec = "l" + "rrr|rrr" + "||" + "rrr|rrr"
+
     for n in tbl["sizes"]:
         log2_n = n.bit_length() - 1
-        bits_order = tbl["bits_order"]
-        ncols = len(bits_order)
 
-        print(f"% n = 2^{{{log2_n}}}")
-        print(r"\begin{tabular}{l" + "rrr|rrr" + "||" + "rrr|rrr" + "}")
-        print(r"\toprule")
+        for kind, row_fn in (("Construction", _filter_constr_row),
+                             ("Queries", _filter_query_row)):
+            print(f"% {kind}, n = 2^{{{log2_n}}}")
+            print(r"\begin{tabular}{" + colspec + "}")
+            print(r"\toprule")
 
-        # Header row 1: construction / queries spanning
-        print(f"& \\multicolumn{{{ncols}}}{{c}}{{Construction (ns/key)}}"
-              f" & \\multicolumn{{{ncols}}}{{c}}{{Queries (ns/key)}} \\\\")
+            print(f"& \\multicolumn{{{ncols}}}{{c}}{{Sequential}}"
+                  f" & \\multicolumn{{{ncols}}}{{c}}{{Parallel}} \\\\")
 
-        # Header row 2: bit widths
-        hdr = ""
-        for bits in bits_order:
-            hdr += f" & {bits}"
-        hdr += hdr  # same for queries
-        print(hdr + r" \\")
-        print(r"\midrule")
-
-        # Data rows
-        for method_name, label in tbl["methods"]:
-            if method_name not in METHODS:
-                continue
-            cfg = METHODS[method_name]
-            rdir = Path(args.results_dir) / method_name
-            tool_for_parse = _parse_tool(cfg["tool"])
-
-            row = label
-            # Construction columns
+            hdr = ""
             for bits in bits_order:
-                bench_err = rdir / f"bench.{n}.{bits}.err"
-                val = ""
-                if bench_err.exists():
-                    bd = parse_build(bench_err.read_text(), tool_for_parse)
-                    v = bd.get("constr_ns")
-                    if v is not None:
-                        val = f"{v:.1f}"
-                row += f" & {val}"
+                hdr += f" & {bits}"
+            hdr += hdr
+            print(hdr + r" \\")
+            print(r"\midrule")
 
-            # Query columns
-            for bits in bits_order:
-                bench_err = rdir / f"bench.{n}.{bits}.err"
-                val = ""
-                if bench_err.exists():
-                    qd = parse_query(bench_err.read_text(), tool_for_parse)
-                    v = qd.get("query_min")
-                    if v is not None:
-                        val = f"{v:.1f}"
-                row += f" & {val}"
+            for label, variants in tbl["rows"]:
+                print(row_fn(label, variants, bits_order, n, args))
 
-            row += r" \\"
-            print(row)
-
-        print(r"\bottomrule")
-        print(r"\end{tabular}")
-        print()
+            print(r"\bottomrule")
+            print(r"\end{tabular}")
+            print()
 
 
 def _table_mmphf(tbl, args):
