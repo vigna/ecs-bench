@@ -188,18 +188,6 @@ def ensure_sux_built(sux_dir, need_comp_vfunc=False):
     sux = Path(sux_dir)
     target = sux_target_dir(sux_dir)
     examples = target / "release" / "examples"
-    needed = [
-        target / "release" / "vfilter",
-        target / "release" / "vfunc",
-        examples / "bench_vfilter",
-        examples / "bench_vfunc",
-        target / "release" / "comp_vfunc",
-        examples / "bench_comp_vfunc",
-        examples / "bench_phast",
-    ]
-    if all(p.exists() for p in needed):
-        return
-
     print(f"Building sux-rs binaries in {sux}…")
     cmd = [
         "cargo", "build",
@@ -221,10 +209,6 @@ def ensure_sux_built(sux_dir, need_comp_vfunc=False):
 
 def ensure_csf_built():
     """Ensure bench_csf is built via the top-level Makefile."""
-    bench_csf = Path(REPO_ROOT) / "bench_csf"
-    if bench_csf.exists():
-        return True
-
     print("Building bench_csf…")
     r = subprocess.run(
         ["make", "bench_csf"],
@@ -250,9 +234,6 @@ def ensure_burr_built(burr_dir, bits_values):
         return False
 
     for bits in bits_values:
-        binary = burr / f"bench{bits}"
-        if binary.exists():
-            continue
         print(f"Building BuRR bench{bits} in {burr}…")
         r = subprocess.run(
             ["make", f"RIBBON_BITS={bits}",
@@ -267,10 +248,6 @@ def ensure_burr_built(burr_dir, bits_values):
 
 def ensure_lemonhash_built():
     """Ensure bench_lemonhash is built via the top-level Makefile."""
-    bench = Path(REPO_ROOT) / "bench_lemonhash"
-    if bench.exists():
-        return True
-
     print("Building bench_lemonhash…")
     r = subprocess.run(
         ["make", "bench_lemonhash"],
