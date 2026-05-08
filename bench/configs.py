@@ -299,32 +299,32 @@ METHODS = {
     "GOV3Function": {
         "tool": "java",
         "label": "GOV3 (Sux4J)",
-        "java_type": "gov3",
-        "max_log2": 30,
+        "java_type": "GOV3Function",
+        "sizes": [1 << 20, 1 << 30],
     },
-    "GOV3Compressed-Geo": {
+    "GV3CompressedFunction-Geo": {
         "tool": "java",
         "label": "GOV3Comp(geo)",
-        "java_type": "gov3compressed",
+        "java_type": "GV3CompressedFunction",
         "distribution": ["--geometric"],
         "bits_agnostic": True,
-        "max_log2": 28,
+        "sizes": [1 << 20, 1 << 28],
     },
-    "GOV3Compressed-Zipf": {
+    "GV3CompressedFunction-Zipf": {
         "tool": "java",
         "label": "GOV3Comp(zipf)",
-        "java_type": "gov3compressed",
+        "java_type": "GV3CompressedFunction",
         "distribution": ["--zipf", "2000"],
         "bits_agnostic": True,
-        "max_log2": 28,
+        "sizes": [1 << 20, 1 << 28],
     },
-    "GOV3Compressed-Uni256": {
+    "GV3CompressedFunction-Uni256": {
         "tool": "java",
         "label": "GOV3Comp(uni256)",
-        "java_type": "gov3compressed",
+        "java_type": "GV3CompressedFunction",
         "distribution": ["--uniform", "256"],
         "bits_agnostic": True,
-        "max_log2": 28,
+        "sizes": [1 << 20, 1 << 28],
     },
 }
 

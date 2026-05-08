@@ -549,12 +549,14 @@ def java_build_cmd(cfg, n, bits, outfile):
     java_dir = Path(REPO_ROOT) / "java"
     jar = java_dir / "target" / "ecs-bench-java-1.0-SNAPSHOT.jar"
     classpath = f"{jar}:{java_dir / 'target' / 'lib' / '*'}"
-    cmd = ["java", "-cp", classpath, "it.unimi.dsi.ecs.BenchBuilder"]
+    mem = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    xmx = int(mem * 0.9) // (1 << 20)
+    cmd = ["java", f"-Xmx{xmx}m", "-cp", classpath, "it.unimi.dsi.ecs.BenchBuilder"]
 
-    if cfg["java_type"] == "gov3":
-        cmd += ["gov3", str(n), str(bits), str(outfile)]
-    elif cfg["java_type"] == "gov3compressed":
-        cmd += ["gov3compressed", str(n)]
+    if cfg["java_type"] == "GOV3Function":
+        cmd += ["GOV3Function", str(n), str(bits), str(outfile)]
+    elif cfg["java_type"] == "GV3CompressedFunction":
+        cmd += ["GV3CompressedFunction", str(n)]
         cmd += cfg["distribution"]
         cmd += [str(outfile)]
     return cmd
@@ -563,7 +565,7 @@ def java_build_cmd(cfg, n, bits, outfile):
 def java_query_cmd(cfg, bits, dumpfile):
     """Assemble the Sux4J C query harness command line."""
     sux4j_c = Path(REPO_ROOT) / "Sux4J" / "c"
-    if cfg["java_type"] == "gov3compressed":
+    if cfg["java_type"] == "GV3CompressedFunction":
         binary = "test_csf3_uint64"
     else:
         binary = f"test_sf3_filter{bits}"
@@ -644,7 +646,7 @@ def cmd_bench(args):
         java_ok = ensure_java_built()
         if java_ok:
             filter_bits = bits_list if any(
-                METHODS[m].get("java_type") == "gov3" for m in methods
+                METHODS[m].get("java_type") == "GOV3Function" for m in methods
                 if METHODS[m]["tool"] == "java") else []
             java_ok = ensure_sux4j_c_built(filter_bits)
 
@@ -673,9 +675,14 @@ def cmd_bench(args):
             "csf", "comp-vfunc", "phast", "mmphf", "lemonhash"))
         method_bits = [0] if bits_agnostic else bits_list
 
+        explicit_sizes = cfg.get("sizes")
         for bits in method_bits:
-            for log2_n in range(MIN_LOG2, max_log2 + 1):
-                work.append((log2_n, method_name, bits))
+            if explicit_sizes is not None:
+                for n in explicit_sizes:
+                    work.append((n.bit_length() - 1, method_name, bits))
+            else:
+                for log2_n in range(MIN_LOG2, max_log2 + 1):
+                    work.append((log2_n, method_name, bits))
 
     work.sort(key=lambda t: t[0])
 
@@ -1029,7 +1036,7 @@ def _bench_sux(cfg, method_name, n, bits, log2_n, rdir, args):
 def _bench_java(cfg, method_name, n, bits, log2_n, rdir, args):
     """Run a single Sux4J benchmark: Java build+dump, C query, clean up."""
     ddir = data_dir(args.results_dir, method_name)
-    is_compressed = cfg["java_type"] == "gov3compressed"
+    is_compressed = cfg["java_type"] == "GV3CompressedFunction"
     suffix = "func" if is_compressed else "filter"
     outfile = ddir / f"{suffix}.{n}.{bits}.bin"
 
@@ -1575,7 +1582,7 @@ TABLES = {
     "java-comp": {
         "rows": [
             ("CompVFunc", ["CompVFunc-Geo", "CompVFunc-Zipf", "CompVFunc-Uni256"]),
-            ("GOV3Comp", ["GOV3Compressed-Geo", "GOV3Compressed-Zipf", "GOV3Compressed-Uni256"]),
+            ("GOV3Comp", ["GV3CompressedFunction-Geo", "GV3CompressedFunction-Zipf", "GV3CompressedFunction-Uni256"]),
         ],
         "dist_labels": ["Geometric", "Zipf", "Uniform"],
         "sizes": [1 << 20, 1 << 28],
@@ -1958,9 +1965,9 @@ def cmd_java(args):
         return
 
     filter_methods = [m for m in java_methods
-                      if METHODS[m]["java_type"] == "gov3"]
+                      if METHODS[m]["java_type"] == "GOV3Function"]
     comp_methods = [m for m in java_methods
-                    if METHODS[m]["java_type"] == "gov3compressed"]
+                    if METHODS[m]["java_type"] == "GV3CompressedFunction"]
 
     if filter_methods:
         if not ensure_sux4j_c_built(bits_list):
@@ -1972,19 +1979,19 @@ def cmd_java(args):
     work = []
     for method_name in java_methods:
         cfg = METHODS[method_name]
-        max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
-        is_compressed = cfg["java_type"] == "gov3compressed"
+        is_compressed = cfg["java_type"] == "GV3CompressedFunction"
         method_bits = [0] if is_compressed else bits_list
+        sizes = cfg.get("sizes", [1 << MIN_LOG2])
 
         for bits in method_bits:
-            for log2_n in range(MIN_LOG2, max_log2 + 1):
-                work.append((log2_n, method_name, bits))
+            for n in sizes:
+                work.append((n, method_name, bits))
 
     work.sort(key=lambda t: t[0])
 
-    for log2_n, method_name, bits in work:
+    for n, method_name, bits in work:
         cfg = METHODS[method_name]
-        n = 1 << log2_n
+        log2_n = n.bit_length() - 1
         rdir = result_dir(args.results_dir, method_name)
 
         bench_err = rdir / f"bench.{n}.{bits}.err"

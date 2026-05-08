@@ -46,7 +46,7 @@ public class BenchBuilder {
 	}
 
 	private static int sampleZipf(final double[] cdf, final SplittableRandom rng) {
-		final double u = (rng.nextLong() >>> 11) / (double)(1L << 53);
+		final double u = rng.nextDouble();
 		int lo = 0, hi = cdf.length;
 		while (lo < hi) {
 			final int mid = (lo + hi) >>> 1;
@@ -69,16 +69,16 @@ public class BenchBuilder {
 		final SplittableRandom rng = new SplittableRandom(0);
 		final LongArrayList values = new LongArrayList();
 		for (long i = 0; i < n; i++)
-			values.add(Long.remainderUnsigned(rng.nextLong(), k));
+			values.add(rng.nextLong(k));
 		return values;
 	}
 
 	public static void main(final String[] args) throws IOException {
 		if (args.length < 3) {
-			System.err.println("Usage: BenchBuilder gov3 <n> <bits> <output>");
-			System.err.println("       BenchBuilder gov3compressed <n> --geometric <output>");
-			System.err.println("       BenchBuilder gov3compressed <n> --zipf <K> <output>");
-			System.err.println("       BenchBuilder gov3compressed <n> --uniform <K> <output>");
+			System.err.println("Usage: BenchBuilder GOV3Function <n> <bits> <output>");
+			System.err.println("       BenchBuilder GV3CompressedFunction <n> --geometric <output>");
+			System.err.println("       BenchBuilder GV3CompressedFunction <n> --zipf <K> <output>");
+			System.err.println("       BenchBuilder GV3CompressedFunction <n> --uniform <K> <output>");
 			System.exit(1);
 		}
 
@@ -86,7 +86,7 @@ public class BenchBuilder {
 		final long n = Long.parseLong(args[1]);
 		final ObjectArrayList<byte[]> keys = generateKeys(n);
 
-		if ("gov3".equals(type)) {
+		if ("GOV3Function".equals(type)) {
 			final int bits = Integer.parseInt(args[2]);
 			final String output = args[3];
 
@@ -100,7 +100,7 @@ public class BenchBuilder {
 			System.err.println("Dumping to " + output);
 			f.dump(output);
 
-		} else if ("gov3compressed".equals(type)) {
+		} else if ("GV3CompressedFunction".equals(type)) {
 			final String distFlag = args[2];
 			final LongArrayList values;
 			final String output;
@@ -134,7 +134,7 @@ public class BenchBuilder {
 			f.dump(output);
 
 		} else {
-			System.err.println("Unknown type: " + type + " (expected gov3 or gov3compressed)");
+			System.err.println("Unknown type: " + type + " (expected GOV3Function or GV3CompressedFunction)");
 			System.exit(1);
 		}
 
