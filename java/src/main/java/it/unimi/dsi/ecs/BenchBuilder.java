@@ -127,7 +127,7 @@ public class BenchBuilder {
 				.keys(keys)
 				.transform(TransformationStrategies.rawByteArray())
 				.values(values)
-				.codec(new Codec.Huffman())
+				.codec(new Codec.Huffman(20, 1))
 				.build();
 
 			System.err.println("Dumping to " + output);
