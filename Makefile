@@ -27,6 +27,7 @@ all: bench_csf bench_lemonhash
 # tensorflow (4GB+).  Use this instead of git clone --recurse-submodules.
 init:
 	git submodule update --init --recursive BuRR BuRR-VL sux-rs
+	git submodule update --init Sux4J
 	git submodule update --init LearnedStaticFunction
 	git submodule update --init MMPHF-Experiments
 	cd MMPHF-Experiments && git -c url.https://github.com/.insteadOf=git@github.com: submodule update --init cpp/extlib/LeMonHash

@@ -16,3 +16,6 @@
 [submodule "MMPHF-Experiments"]
 	path = MMPHF-Experiments
 	url = git@github.com:vigna/MMPHF-Experiments.git
+[submodule "Sux4J"]
+	path = Sux4J
+	url = git@github.com:vigna/Sux4J.git
