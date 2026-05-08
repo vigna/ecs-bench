@@ -289,6 +289,43 @@ METHODS = {
         "query_keys": 10_000_000,
         "max_log2": 30,
     },
+    # -----------------------------------------------------------------
+    # Sux4J GOV3 methods (Java build + C query)
+    # -----------------------------------------------------------------
+    #
+    # Build: Java BenchBuilder creates GOV3Function/GV3CompressedFunction
+    #        with LE-encoded uint64 keys, dumps C-binary.
+    # Query: C test harness (sf3/csf3) loads dump, benchmarks queries.
+    "GOV3Function": {
+        "tool": "java",
+        "label": "GOV3 (Sux4J)",
+        "java_type": "gov3",
+        "max_log2": 30,
+    },
+    "GOV3Compressed-Geo": {
+        "tool": "java",
+        "label": "GOV3Comp(geo)",
+        "java_type": "gov3compressed",
+        "distribution": ["--geometric"],
+        "bits_agnostic": True,
+        "max_log2": 28,
+    },
+    "GOV3Compressed-Zipf": {
+        "tool": "java",
+        "label": "GOV3Comp(zipf)",
+        "java_type": "gov3compressed",
+        "distribution": ["--zipf", "2000"],
+        "bits_agnostic": True,
+        "max_log2": 28,
+    },
+    "GOV3Compressed-Uni256": {
+        "tool": "java",
+        "label": "GOV3Comp(uni256)",
+        "java_type": "gov3compressed",
+        "distribution": ["--uniform", "256"],
+        "bits_agnostic": True,
+        "max_log2": 28,
+    },
 }
 
 

@@ -92,7 +92,7 @@ def sux_target_dir(sux_dir):
 
 
 _PARSE_TOOL_MAP = {"csf": "burr", "comp-vfunc": "sux", "phast": "sux",
-                   "mmphf": "sux", "lemonhash": "sux"}
+                   "mmphf": "sux", "lemonhash": "sux", "java": "sux"}
 
 
 def _parse_tool(tool):
@@ -105,16 +105,19 @@ def result_complete(path, tool):
 
     A .err file can exist but be incomplete if the benchmark was killed
     mid-run.  We verify that the parser can actually extract the
-    construction timing (and query timing, if present in the file).
+    construction timing or query timing from the file.
     Returns True only if the file is present and parseable.
     """
     if not path.exists():
         return False
     text = path.read_text()
     bd = parse_build(text, tool)
-    if "constr_ns" not in bd:
-        return False
-    return True
+    if "constr_ns" in bd:
+        return True
+    qd = parse_query(text, tool)
+    if "query_min" in qd:
+        return True
+    return False
 
 
 def resolve_methods(arg):
@@ -283,6 +286,86 @@ def ensure_mmphf_built(sux_dir):
     if r.returncode != 0:
         print(r.stderr, file=sys.stderr)
         sys.exit(f"cargo build failed for lcp_mmphf (exit {r.returncode})")
+
+
+def ensure_java_built():
+    """Compile the Java benchmark builder via Maven wrapper if the jar is missing."""
+    java_dir = Path(REPO_ROOT) / "java"
+    jar = java_dir / "target" / "ecs-bench-java-1.0-SNAPSHOT.jar"
+    if jar.exists():
+        return True
+    print("Building Java benchmark builder…")
+    mvnw = java_dir / "mvnw"
+    r = subprocess.run(
+        [str(mvnw), "-q", "package", "-DskipTests"],
+        cwd=str(java_dir), capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        print("WARNING: Java build failed, skipping GOV3 methods")
+        return False
+    return True
+
+
+_SUX4J_C_VARIANTS = {}
+for _b in EVEN_BITS:
+    _SUX4J_C_VARIANTS[(_b, False)] = (f"test_sf3_filter{_b}", [f"-DSF_{_b}", "-DFILTER"])
+for _b in ODD_BITS:
+    _SUX4J_C_VARIANTS[(_b, False)] = (f"test_sf3_filter{_b}", ["-DFILTER"])
+_SUX4J_C_VARIANTS[("csf", True)] = ("test_csf3_uint64", [])
+
+
+def ensure_sux4j_c_built(bits_values):
+    """Compile the Sux4J C test harnesses for the requested bit widths."""
+    sux4j_c = Path(REPO_ROOT) / "Sux4J" / "c"
+    if not sux4j_c.exists():
+        print("WARNING: Sux4J/c/ not found, skipping GOV3 methods")
+        return False
+
+    cc = os.environ.get("CC", "cc")
+    cflags = ["-O3", "-march=native"]
+
+    for bits in bits_values:
+        key = (bits, False)
+        if key not in _SUX4J_C_VARIANTS:
+            continue
+        binary_name, extra_flags = _SUX4J_C_VARIANTS[key]
+        binary_path = sux4j_c / binary_name
+        if binary_path.exists():
+            continue
+        print(f"  Building {binary_name}…")
+        cmd = [cc] + cflags + extra_flags + [
+            "-o", str(binary_path),
+            str(sux4j_c / "test_sf3_uint64_t.c"),
+            str(sux4j_c / "sf3.c"),
+            str(sux4j_c / "sf.c"),
+            str(sux4j_c / "spooky.c"),
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stderr, file=sys.stderr)
+            print(f"WARNING: failed to compile {binary_name}")
+            return False
+
+    key = ("csf", True)
+    binary_name, extra_flags = _SUX4J_C_VARIANTS[key]
+    binary_path = sux4j_c / binary_name
+    if not binary_path.exists():
+        print(f"  Building {binary_name}…")
+        cmd = [cc] + cflags + extra_flags + [
+            "-o", str(binary_path),
+            str(sux4j_c / "test_csf3_uint64_t.c"),
+            str(sux4j_c / "csf3.c"),
+            str(sux4j_c / "csf.c"),
+            str(sux4j_c / "spooky.c"),
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stderr, file=sys.stderr)
+            print(f"WARNING: failed to compile {binary_name}")
+            return False
+
+    return True
 
 
 # =====================================================================
@@ -461,6 +544,32 @@ def csf_query_cmd(cfg, n, infile):
     return cmd
 
 
+def java_build_cmd(cfg, n, bits, outfile):
+    """Assemble the Java BenchBuilder command line."""
+    java_dir = Path(REPO_ROOT) / "java"
+    jar = java_dir / "target" / "ecs-bench-java-1.0-SNAPSHOT.jar"
+    classpath = f"{jar}:{java_dir / 'target' / 'lib' / '*'}"
+    cmd = ["java", "-cp", classpath, "it.unimi.dsi.ecs.BenchBuilder"]
+
+    if cfg["java_type"] == "gov3":
+        cmd += ["gov3", str(n), str(bits), str(outfile)]
+    elif cfg["java_type"] == "gov3compressed":
+        cmd += ["gov3compressed", str(n)]
+        cmd += cfg["distribution"]
+        cmd += [str(outfile)]
+    return cmd
+
+
+def java_query_cmd(cfg, bits, dumpfile):
+    """Assemble the Sux4J C query harness command line."""
+    sux4j_c = Path(REPO_ROOT) / "Sux4J" / "c"
+    if cfg["java_type"] == "gov3compressed":
+        binary = "test_csf3_uint64"
+    else:
+        binary = f"test_sf3_filter{bits}"
+    return [str(sux4j_c / binary), str(dumpfile)]
+
+
 def run_cmd(cmd, pin=None, dry_run=False):
     """Run a benchmark command, optionally prefixed by a pinning command.
 
@@ -515,9 +624,11 @@ def cmd_bench(args):
     csf_needed = any(METHODS[m]["tool"] == "csf" for m in methods)
     mmphf_needed = any(METHODS[m]["tool"] == "mmphf" for m in methods)
     lemonhash_needed = any(METHODS[m]["tool"] == "lemonhash" for m in methods)
+    java_needed = any(METHODS[m]["tool"] == "java" for m in methods)
     burr_ok = True
     csf_ok = True
     lemonhash_ok = True
+    java_ok = True
 
     if sux_needed or comp_vfunc_needed or phast_needed:
         ensure_sux_built(args.sux_dir, need_comp_vfunc=comp_vfunc_needed)
@@ -529,6 +640,13 @@ def cmd_bench(args):
         csf_ok = ensure_csf_built()
     if lemonhash_needed:
         lemonhash_ok = ensure_lemonhash_built()
+    if java_needed:
+        java_ok = ensure_java_built()
+        if java_ok:
+            filter_bits = bits_list if any(
+                METHODS[m].get("java_type") == "gov3" for m in methods
+                if METHODS[m]["tool"] == "java") else []
+            java_ok = ensure_sux4j_c_built(filter_bits)
 
     # Build the work list: (log2_n, method_name, bits) triples,
     # ordered by size first so that if a method OOMs we still have
@@ -545,6 +663,9 @@ def cmd_bench(args):
             continue
         if cfg["tool"] == "lemonhash" and not lemonhash_ok:
             print(f"Skipping {method_name} (bench_lemonhash not available)")
+            continue
+        if cfg["tool"] == "java" and not java_ok:
+            print(f"Skipping {method_name} (Java/Sux4J not available)")
             continue
 
         max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
@@ -586,6 +707,9 @@ def cmd_bench(args):
         elif cfg["tool"] == "lemonhash":
             _bench_lemonhash(cfg, method_name, n, log2_n,
                              rdir, args)
+        elif cfg["tool"] == "java":
+            _bench_java(cfg, method_name, n, bits, log2_n,
+                        rdir, args)
         else:
             _bench_sux(cfg, method_name, n, bits, log2_n,
                        rdir, args)
@@ -899,6 +1023,49 @@ def _bench_sux(cfg, method_name, n, bits, log2_n, rdir, args):
 
     # --- Clean up ---
     if not args.keep_data and outfile.exists():
+        outfile.unlink()
+
+
+def _bench_java(cfg, method_name, n, bits, log2_n, rdir, args):
+    """Run a single Sux4J benchmark: Java build+dump, C query, clean up."""
+    ddir = data_dir(args.results_dir, method_name)
+    is_compressed = cfg["java_type"] == "gov3compressed"
+    suffix = "func" if is_compressed else "filter"
+    outfile = ddir / f"{suffix}.{n}.{bits}.bin"
+
+    # --- Java build + dump (unpinned) ---
+    cmd = java_build_cmd(cfg, n, bits, outfile)
+    bits_str = f" bits={bits}" if bits > 0 else ""
+    print(f"  bench {method_name} n=2^{log2_n}{bits_str}")
+    result = run_cmd(cmd, dry_run=args.dry_run)
+
+    if args.dry_run:
+        return
+
+    if result is None or result.returncode != 0:
+        err_text = ""
+        if result:
+            err_text = (result.stdout or "") + (result.stderr or "")
+        (rdir / f"bench.{n}.{bits}.err").write_text(err_text)
+        return
+
+    (rdir / f"bench.{n}.{bits}.err").write_text(result.stderr or "")
+
+    if outfile.exists():
+        (rdir / f"bench.{n}.{bits}.size").write_text(
+            str(outfile.stat().st_size))
+
+    # --- C query (pinned) ---
+    qcmd = java_query_cmd(cfg, bits, outfile)
+    qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
+
+    if qr is not None and qr.returncode == 0:
+        with open(rdir / f"bench.{n}.{bits}.err", "a") as f:
+            f.write("\n--- query ---\n")
+            f.write(qr.stdout)
+
+    # --- Clean up ---
+    if not getattr(args, 'keep_data', False) and outfile.exists():
         outfile.unlink()
 
 
@@ -1397,6 +1564,22 @@ TABLES = {
         "dist_labels": ["Geometric", "Zipf", "Uniform"],
         "sizes": [1 << 20, 1 << 29],
     },
+    "java": {
+        "rows": [
+            ("VFilter", {"query": "FuseLge3Shards"}),
+            ("GOV3", {"query": "GOV3Function"}),
+        ],
+        "bits_order": [8, 16, 32, 9, 17, 33],
+        "sizes": [1 << 20, 1 << 30],
+    },
+    "java-comp": {
+        "rows": [
+            ("CompVFunc", ["CompVFunc-Geo", "CompVFunc-Zipf", "CompVFunc-Uni256"]),
+            ("GOV3Comp", ["GOV3Compressed-Geo", "GOV3Compressed-Zipf", "GOV3Compressed-Uni256"]),
+        ],
+        "dist_labels": ["Geometric", "Zipf", "Uniform"],
+        "sizes": [1 << 20, 1 << 28],
+    },
 }
 
 
@@ -1614,6 +1797,133 @@ def _table_comp(tbl, args):
         print()
 
 
+def _table_java(tbl, args):
+    """Render the 'java' table: filter query + overhead comparison."""
+    bits_order = tbl["bits_order"]
+    ncols = len(bits_order)
+    colspec = "l" + "r" * ncols * 2
+
+    for n in tbl["sizes"]:
+        log2_n = n.bit_length() - 1
+
+        print(f"% Java comparison, n = 2^{{{log2_n}}}")
+        print(r"\begin{tabular}{" + colspec + "}")
+        print(r"\toprule")
+
+        print(f"& \\multicolumn{{{ncols}}}{{c}}{{Query (ns/key)}}"
+              f" & \\multicolumn{{{ncols}}}{{c}}{{Overhead (\\%)}} \\\\")
+
+        hdr = ""
+        for bits in bits_order:
+            hdr += f" & {bits}"
+        hdr += hdr
+        print(hdr + r" \\")
+        print(r"\midrule")
+
+        for label, variants in tbl["rows"]:
+            method_name = variants["query"]
+            cfg = METHODS.get(method_name)
+            if cfg is None:
+                continue
+            rdir = Path(args.results_dir) / method_name
+            tool_for_parse = _parse_tool(cfg["tool"])
+
+            row = label
+            query_cells = ""
+            overhead_cells = ""
+            for bits in bits_order:
+                bench_err = rdir / f"bench.{n}.{bits}.err"
+                size_file = rdir / f"bench.{n}.{bits}.size"
+
+                qval = ""
+                oval = ""
+                if bench_err.exists():
+                    text = bench_err.read_text()
+                    qd = parse_query(text, tool_for_parse)
+                    v = qd.get("query_min")
+                    if v is not None:
+                        qval = f"{v:.1f}"
+
+                if size_file.exists():
+                    file_bytes = int(size_file.read_text().strip())
+                    overhead = compute_overhead(file_bytes, n, bits)
+                    oval = f"{overhead:.1f}"
+
+                query_cells += f" & {qval}"
+                overhead_cells += f" & {oval}"
+
+            print(row + query_cells + overhead_cells + r" \\")
+
+        print(r"\bottomrule")
+        print(r"\end{tabular}")
+        print()
+
+
+def _table_java_comp(tbl, args):
+    """Render the 'java-comp' table: compressed function comparison."""
+    dist_labels = tbl["dist_labels"]
+    ndists = len(dist_labels)
+
+    for n in tbl["sizes"]:
+        log2_n = n.bit_length() - 1
+
+        colspec = "l" + "||rrr" * ndists
+        print(f"% Java compressed comparison, n = 2^{{{log2_n}}}")
+        print(r"\begin{tabular}{" + colspec + "}")
+        print(r"\toprule")
+
+        hdr1 = ""
+        for i, dl in enumerate(dist_labels):
+            sep = "||" if i < ndists - 1 else ""
+            hdr1 += f" & \\multicolumn{{3}}{{c{sep}}}{{{dl}}}"
+        print(hdr1 + r" \\")
+
+        sub_hdr = (" & Query & b/key & Ovhd\\%") * ndists
+        print(sub_hdr + r" \\")
+        print(r"\midrule")
+
+        for label, method_names in tbl["rows"]:
+            row = label
+            for method_name in method_names:
+                if method_name not in METHODS:
+                    row += " & & &"
+                    continue
+                cfg = METHODS[method_name]
+                rdir = Path(args.results_dir) / method_name
+                tool_for_parse = _parse_tool(cfg["tool"])
+
+                bench_err = rdir / f"bench.{n}.0.err"
+                size_file = rdir / f"bench.{n}.0.size"
+                query_val = ""
+                bpk_val = ""
+                ovhd_val = ""
+
+                if bench_err.exists():
+                    text = bench_err.read_text()
+                    qd = parse_query(text, tool_for_parse)
+                    v = qd.get("query_min")
+                    if v is not None:
+                        query_val = f"{v:.1f}"
+
+                if size_file.exists():
+                    file_bytes = int(size_file.read_text().strip())
+                    bpk_val = f"{file_bytes * 8.0 / n:.2f}"
+                    dist = cfg.get("distribution")
+                    entropy = distribution_entropy(dist)
+                    if entropy is not None:
+                        ovhd = compute_overhead(file_bytes, n, entropy)
+                        ovhd_val = f"{ovhd:.1f}"
+
+                row += f" & {query_val} & {bpk_val} & {ovhd_val}"
+
+            row += r" \\"
+            print(row)
+
+        print(r"\bottomrule")
+        print(r"\end{tabular}")
+        print()
+
+
 def cmd_table(args):
     """Print LaTeX tables for the paper."""
     if args.table not in TABLES:
@@ -1626,8 +1936,65 @@ def cmd_table(args):
         _table_mmphf(tbl, args)
     elif args.table == "comp":
         _table_comp(tbl, args)
+    elif args.table == "java":
+        _table_java(tbl, args)
+    elif args.table == "java-comp":
+        _table_java_comp(tbl, args)
     else:
         _table_filter(tbl, args)
+
+
+def cmd_java(args):
+    """Build Sux4J structures (Java), query them (C), and clean up."""
+    methods = resolve_methods(args.method)
+    bits_list = resolve_bits(args.bits)
+
+    java_methods = [m for m in methods if METHODS[m]["tool"] == "java"]
+    if not java_methods:
+        print("No Java methods selected.")
+        return
+
+    if not ensure_java_built():
+        return
+
+    filter_methods = [m for m in java_methods
+                      if METHODS[m]["java_type"] == "gov3"]
+    comp_methods = [m for m in java_methods
+                    if METHODS[m]["java_type"] == "gov3compressed"]
+
+    if filter_methods:
+        if not ensure_sux4j_c_built(bits_list):
+            return
+    if comp_methods:
+        if not ensure_sux4j_c_built([]):
+            return
+
+    work = []
+    for method_name in java_methods:
+        cfg = METHODS[method_name]
+        max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
+        is_compressed = cfg["java_type"] == "gov3compressed"
+        method_bits = [0] if is_compressed else bits_list
+
+        for bits in method_bits:
+            for log2_n in range(MIN_LOG2, max_log2 + 1):
+                work.append((log2_n, method_name, bits))
+
+    work.sort(key=lambda t: t[0])
+
+    for log2_n, method_name, bits in work:
+        cfg = METHODS[method_name]
+        n = 1 << log2_n
+        rdir = result_dir(args.results_dir, method_name)
+
+        bench_err = rdir / f"bench.{n}.{bits}.err"
+        tool_for_parse = _parse_tool(cfg["tool"])
+        if not args.force and result_complete(bench_err, tool_for_parse):
+            continue
+
+        _bench_java(cfg, method_name, n, bits, log2_n, rdir, args)
+
+    print("Done.")
 
 
 # =====================================================================
@@ -1719,6 +2086,12 @@ def make_parser():
     cl.add_argument("--data-only", action="store_true",
                     help="Only delete serialized structure files, keep .err results")
 
+    # --- java ---
+    jv = sub.add_parser("java", help="Build Sux4J structures (Java), query (C)")
+    add_common(jv)
+    jv.add_argument("--keep-data", action="store_true", default=False,
+                    help="Keep dump files after query")
+
     return p
 
 
@@ -1733,6 +2106,7 @@ def main():
         "plot": cmd_plot,
         "table": cmd_table,
         "status": cmd_status,
+        "java": cmd_java,
         "clean": cmd_clean,
     }
 
