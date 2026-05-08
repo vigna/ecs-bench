@@ -1178,9 +1178,6 @@ def cmd_par_bench(args):
         else:
             qcmd = burr_query_cmd(cfg, n, bits, outfile, args)
 
-        if args.pin:
-            qcmd = shlex.split(args.pin) + qcmd
-
         instance_dir = rdir / f"parbench.{n}.{bits}.d"
         instance_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1243,7 +1240,7 @@ def cmd_report(args):
 
     Columns:
         n  bits  method  constr_ns  query_min  query_median  query_max
-        query_avg  parbench_max  bits_per_key  overhead_pct  file_bytes
+        query_avg  parbench_med  bits_per_key  overhead_pct  file_bytes
 
     For filters (sux, burr), overhead_pct is relative to the bit width.
     For compressed functions (csf, comp-vfunc), it is relative to the
@@ -1256,7 +1253,7 @@ def cmd_report(args):
     bits_list = resolve_bits(args.bits)
 
     cols = ["n", "bits", "method", "constr_ns", "query_min", "query_median",
-            "query_max", "query_avg", "parbench_max",
+            "query_max", "query_avg", "parbench_med",
             "bits_per_key", "overhead_pct", "file_bytes"]
 
     rows = []
@@ -1285,10 +1282,10 @@ def cmd_report(args):
                 qd = parse_query(text, tool_for_parse)
 
                 pq_err = rdir / f"parbench.{n}.{bits}.err"
-                pq_max = ""
+                pq_med = ""
                 if pq_err.exists():
                     pqd = parse_query(pq_err.read_text(), tool_for_parse)
-                    pq_max = pqd.get("query_max", "")
+                    pq_med = pqd.get("query_median", "")
 
                 size_file = rdir / f"bench.{n}.{bits}.size"
                 file_bytes = ""
@@ -1309,7 +1306,7 @@ def cmd_report(args):
                     _fmt(qd.get("query_median")),
                     _fmt(qd.get("query_max")),
                     _fmt(qd.get("query_avg")),
-                    _fmt(pq_max),
+                    _fmt(pq_med),
                     str(bpk),
                     str(overhead),
                     str(file_bytes),
@@ -1399,8 +1396,8 @@ def _plot_one(figure_name, args, plt):
                     val = parse_build(bench_err.read_text(), tool_for_parse).get("constr_ns")
                 elif col.startswith("query_") and bench_err.exists():
                     val = parse_query(bench_err.read_text(), tool_for_parse).get(col)
-                elif col == "parbench_max" and pq_err.exists():
-                    val = parse_query(pq_err.read_text(), tool_for_parse).get("query_max")
+                elif col == "parbench_med" and pq_err.exists():
+                    val = parse_query(pq_err.read_text(), tool_for_parse).get("query_median")
                 if val is not None and val > global_ymax:
                     global_ymax = val
     global_ymax *= 1.15
@@ -1433,9 +1430,9 @@ def _plot_one(figure_name, args, plt):
                 elif col.startswith("query_") and bench_err.exists():
                     d = parse_query(bench_err.read_text(), tool_for_parse)
                     val = d.get(col)
-                elif col == "parbench_max" and pq_err.exists():
+                elif col == "parbench_med" and pq_err.exists():
                     d = parse_query(pq_err.read_text(), tool_for_parse)
-                    val = d.get("query_max")
+                    val = d.get("query_median")
 
                 if val is not None:
                     xs.append(n)
@@ -1807,8 +1804,12 @@ def _table_comp(tbl, args):
 def _table_java(tbl, args):
     """Render the 'java' table: filter query + overhead comparison."""
     bits_order = tbl["bits_order"]
+    even = [b for b in bits_order if b % 2 == 0]
+    odd = [b for b in bits_order if b % 2 != 0]
     ncols = len(bits_order)
-    colspec = "l" + "r" * ncols * 2
+    n_even = len(even)
+    n_odd = len(odd)
+    colspec = "l" + "r" * n_even + "|" + "r" * n_odd + "r"
 
     for n in tbl["sizes"]:
         log2_n = n.bit_length() - 1
@@ -1818,12 +1819,12 @@ def _table_java(tbl, args):
         print(r"\toprule")
 
         print(f"& \\multicolumn{{{ncols}}}{{c}}{{Query (ns/key)}}"
-              f" & \\multicolumn{{{ncols}}}{{c}}{{Overhead (\\%)}} \\\\")
+              r" & {Overhead} \\")
 
         hdr = ""
         for bits in bits_order:
             hdr += f" & {bits}"
-        hdr += hdr
+        hdr += " &"
         print(hdr + r" \\")
         print(r"\midrule")
 
@@ -1835,15 +1836,13 @@ def _table_java(tbl, args):
             rdir = Path(args.results_dir) / method_name
             tool_for_parse = _parse_tool(cfg["tool"])
 
-            row = label
             query_cells = ""
-            overhead_cells = ""
+            overheads = []
             for bits in bits_order:
                 bench_err = rdir / f"bench.{n}.{bits}.err"
                 size_file = rdir / f"bench.{n}.{bits}.size"
 
                 qval = ""
-                oval = ""
                 if bench_err.exists():
                     text = bench_err.read_text()
                     qd = parse_query(text, tool_for_parse)
@@ -1853,13 +1852,17 @@ def _table_java(tbl, args):
 
                 if size_file.exists():
                     file_bytes = int(size_file.read_text().strip())
-                    overhead = compute_overhead(file_bytes, n, bits)
-                    oval = f"{overhead:.1f}"
+                    overheads.append(compute_overhead(file_bytes, n, bits))
 
                 query_cells += f" & {qval}"
-                overhead_cells += f" & {oval}"
 
-            print(row + query_cells + overhead_cells + r" \\")
+            if overheads:
+                avg_ovhd = sum(overheads) / len(overheads)
+                overhead_cell = f" & $\\approx {avg_ovhd:.1f}\\%$"
+            else:
+                overhead_cell = " &"
+
+            print(label + query_cells + overhead_cell + r" \\")
 
         print(r"\bottomrule")
         print(r"\end{tabular}")

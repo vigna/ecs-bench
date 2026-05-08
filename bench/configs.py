@@ -378,7 +378,7 @@ FIGURES = {
             "Mwhc3",
             "BuRR",
         ],
-        "column": "parbench_max",
+        "column": "parbench_med",
         "ylabel": "ns/key",
     },
     # --- Compressed static functions: all distributions on one plot ---

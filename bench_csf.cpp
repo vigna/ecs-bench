@@ -195,7 +195,7 @@ void run_bench(size_t n, const uint64_t *keys, const uint32_t *values,
   if (no_queries)
     return;
 
-  const uint64_t N = 10000000;
+  const uint64_t N = 100000000;
   const int REPEATS = 5;
 
   std::vector<double> timings;
