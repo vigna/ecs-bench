@@ -47,12 +47,14 @@ def parse_build(text, tool):
         #   "Construction completed … 45.3 ns/key"
         # We match any line with "onstruction" and "ns/key".
         # For large instances, the unit may be μs/key or ms/key.
-        m = re.search(r'onstruction.*?(\d+\.?\d*)\s*(ns|μs|ms)/key', text)
-        if not m:
-            m = re.search(r'Elapsed:.*?(\d+\.?\d*)\s*(ns|μs|ms)/key', text)
-        if m:
-            val = float(m.group(1))
-            unit = m.group(2)
+        # Compound structures (LcpMmphf, Lcp2Mmphf, VFunc2) emit
+        # multiple lines; we take the last one (the overall total).
+        matches = re.findall(r'onstruction.*?(\d+\.?\d*)\s*(ns|μs|ms)/key', text)
+        if not matches:
+            matches = re.findall(r'Elapsed:.*?(\d+\.?\d*)\s*(ns|μs|ms)/key', text)
+        if matches:
+            val_str, unit = matches[-1]
+            val = float(val_str)
             if unit == "μs":
                 val *= 1000.0
             elif unit == "ms":
