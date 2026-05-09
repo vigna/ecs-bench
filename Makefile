@@ -41,7 +41,7 @@ $(BURR_VL)/sorter.o: $(BURR_VL)/sorter.cpp $(BURR_VL)/sorter.hpp
 
 $(BURR_VL)/tlx/build/tlx/libtlx.a:
 	@mkdir -p $(BURR_VL)/tlx/build
-	cd $(BURR_VL)/tlx/build && cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS=-g0 -G Ninja .. && ninja -j4
+	cd $(BURR_VL)/tlx/build && cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-g0 -fno-strict-aliasing" -G Ninja .. && ninja -j4
 
 bench_csf: $(BURR_VL)/sorter.o bench_csf.cpp $(BURR_VL)/tlx/build/tlx/libtlx.a
 	$(CXX) $(OPTFLAGS) $(CFLAGS) -o $@ bench_csf.cpp $(LDFLAGS)
