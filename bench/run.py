@@ -1118,7 +1118,7 @@ def cmd_par_bench(args):
         if cfg["tool"] == "burr" and not burr_ok:
             print(f"Skipping {method_name} (BuRR not available)")
             continue
-        if cfg["tool"] in ("csf", "comp-vfunc", "phast", "mmphf", "lemonhash"):
+        if cfg["tool"] in ("csf", "comp-vfunc", "phast", "mmphf", "lemonhash", "java"):
             continue
         if cfg.get("bits_agnostic"):
             continue
