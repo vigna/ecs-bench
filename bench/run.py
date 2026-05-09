@@ -1941,59 +1941,6 @@ def cmd_table(args):
         _table_filter(tbl, args)
 
 
-def cmd_java(args):
-    """Build Sux4J structures (Java), query them (C), and clean up."""
-    methods = resolve_methods(args.method)
-    bits_list = resolve_bits(args.bits)
-
-    java_methods = [m for m in methods if METHODS[m]["tool"] == "java"]
-    if not java_methods:
-        print("No Java methods selected.")
-        return
-
-    if not ensure_java_built():
-        return
-
-    filter_methods = [m for m in java_methods
-                      if METHODS[m]["java_type"] == "GOV3Function"]
-    comp_methods = [m for m in java_methods
-                    if METHODS[m]["java_type"] == "GV3CompressedFunction"]
-
-    if filter_methods:
-        if not ensure_sux4j_c_built(bits_list):
-            return
-    if comp_methods:
-        if not ensure_sux4j_c_built([]):
-            return
-
-    work = []
-    for method_name in java_methods:
-        cfg = METHODS[method_name]
-        is_compressed = cfg["java_type"] == "GV3CompressedFunction"
-        method_bits = [0] if is_compressed else bits_list
-        sizes = cfg.get("sizes", [1 << MIN_LOG2])
-
-        for bits in method_bits:
-            for n in sizes:
-                work.append((n, method_name, bits))
-
-    work.sort(key=lambda t: t[0])
-
-    for n, method_name, bits in work:
-        cfg = METHODS[method_name]
-        log2_n = n.bit_length() - 1
-        rdir = result_dir(args.results_dir, method_name)
-
-        bench_err = rdir / f"bench.{n}.{bits}.err"
-        tool_for_parse = _parse_tool(cfg["tool"])
-        if not args.force and result_complete(bench_err, tool_for_parse):
-            continue
-
-        _bench_java(cfg, method_name, n, bits, log2_n, rdir, args)
-
-    print("Done.")
-
-
 # =====================================================================
 #  CLI
 # =====================================================================
@@ -2083,12 +2030,6 @@ def make_parser():
     cl.add_argument("--data-only", action="store_true",
                     help="Only delete serialized structure files, keep .err results")
 
-    # --- java ---
-    jv = sub.add_parser("java", help="Build Sux4J structures (Java), query (C)")
-    add_common(jv)
-    jv.add_argument("--keep-data", action="store_true", default=False,
-                    help="Keep dump files after query")
-
     return p
 
 
@@ -2103,7 +2044,6 @@ def main():
         "plot": cmd_plot,
         "table": cmd_table,
         "status": cmd_status,
-        "java": cmd_java,
         "clean": cmd_clean,
     }
 
