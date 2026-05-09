@@ -265,14 +265,6 @@ def ensure_lemonhash_built():
 
 def ensure_mmphf_built(sux_dir):
     """Ensure lcp_mmphf and bench_lcp_mmphf are built in sux-rs."""
-    target = sux_target_dir(sux_dir)
-    needed = [
-        target / "release" / "lcp_mmphf",
-        target / "release" / "examples" / "bench_lcp_mmphf",
-    ]
-    if all(p.exists() for p in needed):
-        return
-
     sux = Path(sux_dir)
     print(f"Building lcp_mmphf + bench_lcp_mmphf in {sux}…")
     cmd = [
@@ -289,11 +281,8 @@ def ensure_mmphf_built(sux_dir):
 
 
 def ensure_java_built():
-    """Compile the Java benchmark builder via Maven wrapper if the jar is missing."""
+    """Compile the Java benchmark builder."""
     java_dir = Path(REPO_ROOT) / "java"
-    jar = java_dir / "target" / "ecs-bench-java-1.0-SNAPSHOT.jar"
-    if jar.exists():
-        return True
     print("Building Java benchmark builder…")
     mvnw = java_dir / "mvnw"
     r = subprocess.run(
@@ -331,8 +320,6 @@ def ensure_sux4j_c_built(bits_values):
             continue
         binary_name, extra_flags = _SUX4J_C_VARIANTS[key]
         binary_path = sux4j_c / binary_name
-        if binary_path.exists():
-            continue
         print(f"  Building {binary_name}…")
         cmd = [cc] + cflags + extra_flags + [
             "-o", str(binary_path),
@@ -350,20 +337,19 @@ def ensure_sux4j_c_built(bits_values):
     key = ("csf", True)
     binary_name, extra_flags = _SUX4J_C_VARIANTS[key]
     binary_path = sux4j_c / binary_name
-    if not binary_path.exists():
-        print(f"  Building {binary_name}…")
-        cmd = [cc] + cflags + extra_flags + [
-            "-o", str(binary_path),
-            str(sux4j_c / "test_csf3_uint64_t.c"),
-            str(sux4j_c / "csf3.c"),
-            str(sux4j_c / "csf.c"),
-            str(sux4j_c / "spooky.c"),
-        ]
-        r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0:
-            print(r.stderr, file=sys.stderr)
-            print(f"WARNING: failed to compile {binary_name}")
-            return False
+    print(f"  Building {binary_name}…")
+    cmd = [cc] + cflags + extra_flags + [
+        "-o", str(binary_path),
+        str(sux4j_c / "test_csf3_uint64_t.c"),
+        str(sux4j_c / "csf3.c"),
+        str(sux4j_c / "csf.c"),
+        str(sux4j_c / "spooky.c"),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        print(f"WARNING: failed to compile {binary_name}")
+        return False
 
     return True
 
