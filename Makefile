@@ -16,6 +16,8 @@ INCLUDES = -I$(BURR_VL) \
            -I$(LSF)/include
 
 CFLAGS = -std=c++20 -march=native -D_REENTRANT $(INCLUDES)
+
+# GCC 15+ miscompiles LeMonHash/SimpleRibbon at -O3 without -fno-strict-aliasing
 OPTFLAGS = -O3 -DNDEBUG -march=native -fPIE -fno-strict-aliasing
 
 LDFLAGS = $(BURR_VL)/sorter.o $(BURR_VL)/tlx/build/tlx/libtlx.a \

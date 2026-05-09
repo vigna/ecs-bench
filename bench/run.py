@@ -236,6 +236,7 @@ def ensure_burr_built(burr_dir, bits_values):
         print(f"WARNING: BuRR directory {burr} not found, skipping BuRR methods")
         return False
 
+    # GCC 15+ miscompiles LeMonHash/SimpleRibbon at -O3 without -fno-strict-aliasing
     for bits in bits_values:
         print(f"Building BuRR bench{bits} in {burr}…")
         r = subprocess.run(

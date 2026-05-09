@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 project(ecs-bench-lemonhash)
 
-# GCC 15 miscompiles SimpleRibbon at -O3 due to strict-aliasing UB in storage.hpp.
+# GCC 15+ miscompiles LeMonHash/SimpleRibbon at -O3 without -fno-strict-aliasing
 add_compile_options(-march=native -Wno-template-body -fno-strict-aliasing)
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG" CACHE STRING "" FORCE)
 
