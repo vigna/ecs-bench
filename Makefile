@@ -4,7 +4,7 @@
 # from LearnedStaticFunction/include/.  The BuRR-VL library needs tlx
 # and ips2ra (pulled in as submodules of BuRR-VL/).
 
-CXX = clang++
+CXX ?= c++
 
 BURR_VL = BuRR-VL
 LSF = LearnedStaticFunction
@@ -16,7 +16,7 @@ INCLUDES = -I$(BURR_VL) \
            -I$(LSF)/include
 
 CFLAGS = -std=c++20 -march=native -D_REENTRANT $(INCLUDES)
-OPTFLAGS = -O3 -DNDEBUG -march=native -fPIE
+OPTFLAGS = -O3 -DNDEBUG -march=native -fPIE -fno-strict-aliasing
 
 LDFLAGS = $(BURR_VL)/sorter.o $(BURR_VL)/tlx/build/tlx/libtlx.a \
           -lpthread -ltbb -latomic
