@@ -101,24 +101,24 @@ def _parse_tool(tool):
     return _PARSE_TOOL_MAP.get(tool, tool)
 
 
-def result_complete(path, tool):
+def result_complete(path, tool, no_queries=False):
     """Check whether a result file exists and contains valid timing data.
 
     A .err file can exist but be incomplete if the benchmark was killed
-    mid-run.  We verify that the parser can actually extract the
-    construction timing or query timing from the file.
-    Returns True only if the file is present and parseable.
+    mid-run (e.g. after the build phase wrote its output but before the
+    query phase appended its results).  We require both construction
+    *and* query timing to be present, unless ``no_queries`` is True.
     """
     if not path.exists():
         return False
     text = path.read_text()
     bd = parse_build(text, tool)
-    if "constr_ns" in bd:
+    if "constr_ns" not in bd:
+        return False
+    if no_queries:
         return True
     qd = parse_query(text, tool)
-    if "query_min" in qd:
-        return True
-    return False
+    return "query_min" in qd
 
 
 def resolve_methods(arg):
@@ -190,8 +190,6 @@ def ensure_sux_built(sux_dir, need_comp_vfunc=False):
     for all current benchmarks.
     """
     sux = Path(sux_dir)
-    target = sux_target_dir(sux_dir)
-    examples = target / "release" / "examples"
     print(f"Building sux-rs binaries in {sux}…")
     cmd = [
         "cargo", "build",
@@ -759,7 +757,9 @@ def cmd_bench(args):
 
         bench_err = rdir / f"bench.{n}.{bits}.err"
         tool_for_parse = _parse_tool(cfg["tool"])
-        if not args.force and result_complete(bench_err, tool_for_parse):
+        if not args.force and result_complete(
+                bench_err, tool_for_parse,
+                no_queries=cfg.get("no_queries", False)):
             continue
 
         if cfg["tool"] == "comp-vfunc":
@@ -1301,8 +1301,9 @@ def cmd_par_bench(args):
         ddir = data_dir(args.results_dir, method_name)
 
         agg_err = rdir / f"parbench.{n}.{bits}.err"
+        tool_for_parse = _parse_tool(cfg["tool"])
         if not args.force and agg_err.exists() and \
-                parse_query(agg_err.read_text(), cfg["tool"]):
+                parse_query(agg_err.read_text(), tool_for_parse):
             continue
 
         # --- Build and serialize ---
@@ -1367,7 +1368,7 @@ def cmd_par_bench(args):
             ifile = instance_dir / f"{i}.err"
             if not ifile.exists():
                 continue
-            qdata = parse_query(ifile.read_text(), cfg["tool"])
+            qdata = parse_query(ifile.read_text(), tool_for_parse)
             if "query_median" in qdata:
                 medians.append(qdata["query_median"])
         medians.sort()

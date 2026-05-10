@@ -192,6 +192,11 @@ void run_bench(size_t n, const uint64_t *keys, const uint32_t *values,
     }
   }
 
+  // Free construction data before the query benchmark to avoid cache
+  // pollution from the key/value arrays.
+  keys.reset();
+  values.reset();
+
   if (no_queries)
     return;
 

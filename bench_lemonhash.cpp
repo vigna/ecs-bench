@@ -92,6 +92,16 @@ int main(int argc, char **argv) {
     query_indices[i] = qrng() % n;
   }
 
+  // Free construction keys before the query benchmark to avoid cache
+  // pollution.  We keep query_indices which indexes into the now-freed
+  // keys vector, so we need to copy the actual key values first.
+  std::vector<uint64_t> queries(query_keys);
+  for (size_t i = 0; i < query_keys; i++) {
+    queries[i] = keys[query_indices[i]];
+  }
+  { std::vector<uint64_t>().swap(keys); }
+  { std::vector<size_t>().swap(query_indices); }
+
   // Query benchmark: random access into keys
   std::vector<double> timings;
   timings.reserve(repeats);
@@ -100,7 +110,7 @@ int main(int argc, char **argv) {
     uint64_t acc = 0;
     auto qstart = std::chrono::steady_clock::now();
     for (size_t i = 0; i < query_keys; i++) {
-      acc ^= mmphf(keys[query_indices[i]]);
+      acc ^= mmphf(queries[i]);
     }
     const volatile uint64_t _sink = acc;
     auto qend = std::chrono::steady_clock::now();

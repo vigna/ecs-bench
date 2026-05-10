@@ -276,7 +276,7 @@ METHODS = {
         "label": "LcpMmphf(int)",
         "variant": "lcp",
         "build_threads": 1,
-        "query_keys": 10_000_000,
+        "query_keys": 100_000_000,
         "max_log2": 30,
     },
     "Lcp2MmphfInt": {
@@ -284,13 +284,13 @@ METHODS = {
         "label": "Lcp2Mmphf(int)",
         "variant": "lcp2",
         "build_threads": 1,
-        "query_keys": 10_000_000,
+        "query_keys": 100_000_000,
         "max_log2": 30,
     },
     "LeMonHashInt": {
         "tool": "lemonhash",
         "label": "LeMonHash(int)",
-        "query_keys": 10_000_000,
+        "query_keys": 100_000_000,
         "max_log2": 30,
     },
     # -----------------------------------------------------------------
