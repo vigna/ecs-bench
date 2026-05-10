@@ -54,7 +54,7 @@ SUX_PROFILE = "bench"
 # metric, not a build parameter).  Used as the default when a method
 # does not set "bits_agnostic" explicitly.
 BITS_AGNOSTIC_TOOLS = frozenset({
-    "csf", "comp-vfunc", "phast", "mmphf", "lemonhash", "java",
+    "csf", "comp-vfunc", "phast", "mmphf", "lemonhash",
 })
 
 # --- Method definitions ---
