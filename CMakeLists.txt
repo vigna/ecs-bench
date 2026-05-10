@@ -10,3 +10,7 @@ add_subdirectory(MMPHF-Experiments/cpp/extlib/LeMonHash)
 add_executable(bench_lemonhash bench_lemonhash.cpp)
 target_compile_features(bench_lemonhash PRIVATE cxx_std_20)
 target_link_libraries(bench_lemonhash PRIVATE LeMonHash)
+
+add_executable(bench_lemonhash_str bench_lemonhash_str.cpp)
+target_compile_features(bench_lemonhash_str PRIVATE cxx_std_20)
+target_link_libraries(bench_lemonhash_str PRIVATE LeMonHash)

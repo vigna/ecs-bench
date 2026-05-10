@@ -23,7 +23,7 @@ OPTFLAGS = -O3 -DNDEBUG -march=native -fPIE -fno-strict-aliasing
 LDFLAGS = $(BURR_VL)/sorter.o $(BURR_VL)/tlx/build/tlx/libtlx.a \
           -lpthread -ltbb -latomic
 
-all: bench_csf bench_lemonhash
+all: bench_csf bench_lemonhash bench_lemonhash_str
 
 # Initialize submodules without pulling LearnedStaticFunction's nested
 # tensorflow (4GB+).  Use this instead of git clone --recurse-submodules.
@@ -51,8 +51,13 @@ bench_lemonhash: bench_lemonhash.cpp
 	cd build && cmake -DCMAKE_BUILD_TYPE=Release -G Ninja .. && ninja bench_lemonhash
 	cp build/bench_lemonhash $@
 
+bench_lemonhash_str: bench_lemonhash_str.cpp
+	@mkdir -p build
+	cd build && cmake -DCMAKE_BUILD_TYPE=Release -G Ninja .. && ninja bench_lemonhash_str
+	cp build/bench_lemonhash_str $@
+
 clean:
-	rm -f bench_csf bench_lemonhash $(BURR_VL)/sorter.o
+	rm -f bench_csf bench_lemonhash bench_lemonhash_str $(BURR_VL)/sorter.o
 	rm -rf $(BURR_VL)/tlx/build build
 	rm -f BuRR/bench[0-9]* BuRR/ribbon[0-9]* BuRR/debug[0-9]* \
 	      BuRR/parbench[0-9]* BuRR/parrun[0-9]* BuRR/pardbg[0-9]* \

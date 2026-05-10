@@ -92,7 +92,8 @@ def sux_target_dir(sux_dir):
 
 
 _PARSE_TOOL_MAP = {"csf": "burr", "comp-vfunc": "sux", "phast": "sux",
-                   "mmphf": "sux", "lemonhash": "sux", "java": "sux"}
+                   "mmphf": "sux", "lemonhash": "sux", "java": "sux",
+                   "mmphf-str": "sux", "lemonhash-str": "sux"}
 
 
 def _parse_tool(tool):
@@ -262,6 +263,40 @@ def ensure_lemonhash_built():
         print("WARNING: bench_lemonhash build failed, skipping LeMonHash")
         return False
     return True
+
+
+def ensure_lemonhash_str_built():
+    """Ensure bench_lemonhash_str is built via the top-level Makefile."""
+    print("Building bench_lemonhash_str…")
+    r = subprocess.run(
+        ["make", "bench_lemonhash_str"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        print("WARNING: bench_lemonhash_str build failed, skipping LeMonHashStr")
+        return False
+    return True
+
+
+# --- String dataset helpers ---
+
+# Directory containing sorted string datasets (one string per line).
+DATA_DIR = os.path.join(REPO_ROOT, "data")
+
+
+def list_datasets():
+    """Return sorted list of dataset filenames in the data/ directory.
+
+    Returns an empty list if the directory does not exist.
+    """
+    if not os.path.isdir(DATA_DIR):
+        return []
+    return sorted(
+        f for f in os.listdir(DATA_DIR)
+        if os.path.isfile(os.path.join(DATA_DIR, f))
+        and not f.startswith(".")
+    )
 
 
 def ensure_mmphf_built(sux_dir):
@@ -612,16 +647,19 @@ def cmd_bench(args):
     burr_needed = any(METHODS[m]["tool"] == "burr" for m in methods)
     csf_needed = any(METHODS[m]["tool"] == "csf" for m in methods)
     mmphf_needed = any(METHODS[m]["tool"] == "mmphf" for m in methods)
+    mmphf_str_needed = any(METHODS[m]["tool"] == "mmphf-str" for m in methods)
     lemonhash_needed = any(METHODS[m]["tool"] == "lemonhash" for m in methods)
+    lemonhash_str_needed = any(METHODS[m]["tool"] == "lemonhash-str" for m in methods)
     java_needed = any(METHODS[m]["tool"] == "java" for m in methods)
     burr_ok = True
     csf_ok = True
     lemonhash_ok = True
+    lemonhash_str_ok = True
     java_ok = True
 
     if sux_needed or comp_vfunc_needed or phast_needed:
         ensure_sux_built(args.sux_dir, need_comp_vfunc=comp_vfunc_needed)
-    if mmphf_needed:
+    if mmphf_needed or mmphf_str_needed:
         ensure_mmphf_built(args.sux_dir)
     if burr_needed:
         burr_ok = ensure_burr_built(args.burr_dir, bits_list)
@@ -629,6 +667,8 @@ def cmd_bench(args):
         csf_ok = ensure_csf_built()
     if lemonhash_needed:
         lemonhash_ok = ensure_lemonhash_built()
+    if lemonhash_str_needed:
+        lemonhash_str_ok = ensure_lemonhash_str_built()
     if java_needed:
         java_ok = ensure_java_built()
         if java_ok:
@@ -637,6 +677,31 @@ def cmd_bench(args):
                 if METHODS[m]["tool"] == "java") else []
             java_ok = ensure_sux4j_c_built(filter_bits)
 
+    # --- String-dataset methods (iterate over files in data/) ---
+    datasets = list_datasets()
+    str_methods = [m for m in methods
+                   if METHODS[m]["tool"] in ("mmphf-str", "lemonhash-str")]
+    if str_methods and not datasets:
+        print("Skipping string methods (no datasets in data/)")
+        str_methods = []
+
+    for method_name in str_methods:
+        cfg = METHODS[method_name]
+        if cfg["tool"] == "lemonhash-str" and not lemonhash_str_ok:
+            print(f"Skipping {method_name} (bench_lemonhash_str not available)")
+            continue
+        rdir = result_dir(args.results_dir, method_name)
+        tool_for_parse = _parse_tool(cfg["tool"])
+        for dataset in datasets:
+            bench_err = rdir / f"bench.{dataset}.0.err"
+            if not args.force and result_complete(bench_err, tool_for_parse):
+                continue
+            if cfg["tool"] == "mmphf-str":
+                _bench_mmphf_str(cfg, method_name, dataset, rdir, args)
+            elif cfg["tool"] == "lemonhash-str":
+                _bench_lemonhash_str(cfg, method_name, dataset, rdir, args)
+
+    # --- Size-based methods (the standard log2 iteration) ---
     # Build the work list: (log2_n, method_name, bits) triples,
     # ordered by size first so that if a method OOMs we still have
     # complete data at every smaller size.
@@ -644,6 +709,8 @@ def cmd_bench(args):
     for method_name in methods:
         cfg = METHODS[method_name]
 
+        if cfg["tool"] in ("mmphf-str", "lemonhash-str"):
+            continue
         if cfg["tool"] == "burr" and not burr_ok:
             print(f"Skipping {method_name} (BuRR not available)")
             continue
@@ -928,6 +995,98 @@ def _bench_lemonhash(cfg, method_name, n, log2_n, rdir, args):
         (rdir / f"bench.{n}.0.size").write_text(str(mem_size))
 
 
+def _bench_mmphf_str(cfg, method_name, dataset, rdir, args):
+    """Run a LcpMmphfStr/Lcp2MmphfStr benchmark on a string dataset.
+
+    Build:  lcp_mmphf -f <datafile> --unaligned --threads 1 [-2] <outfile>
+    Query:  bench_lcp_mmphf <query_keys> <outfile> -f <datafile>
+            --unaligned [-2] --repeats 5
+    """
+    target = sux_target_dir(args.sux_dir)
+    ddir = data_dir(args.results_dir, method_name)
+    outfile = ddir / f"func.{dataset}.bin"
+    datafile = str(Path(DATA_DIR) / dataset)
+
+    # --- Build (unpinned) ---
+    cmd = [str(target / "release" / "lcp_mmphf")]
+    cmd += ["-f", datafile]
+    cmd += ["--unaligned"]
+    cmd += ["--threads", "1"]
+    if cfg.get("variant") == "lcp2":
+        cmd += ["-2"]
+    cmd += [str(outfile)]
+
+    print(f"  bench {method_name} dataset={dataset}")
+    result = run_cmd(cmd, dry_run=args.dry_run)
+
+    # --- Query (pinned, only if build succeeded) ---
+    qkeys = cfg.get("query_keys", QUERY_KEYS)
+    qcmd = [str(target / "release" / "examples" / "bench_lcp_mmphf")]
+    qcmd += [str(qkeys), str(outfile)]
+    qcmd += ["-f", datafile]
+    qcmd += ["--unaligned"]
+    if cfg.get("variant") == "lcp2":
+        qcmd += ["-2"]
+    qcmd += ["--repeats", "5"]
+    qr = None
+    if args.dry_run or result.returncode == 0:
+        qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
+
+    if args.dry_run:
+        return
+
+    build_output = result.stderr
+    if result.returncode != 0:
+        (rdir / f"bench.{dataset}.0.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
+        return
+
+    (rdir / f"bench.{dataset}.0.err").write_text(build_output)
+
+    if outfile.exists():
+        (rdir / f"bench.{dataset}.0.size").write_text(
+            str(outfile.stat().st_size))
+
+    if qr is not None and qr.returncode == 0:
+        with open(rdir / f"bench.{dataset}.0.err", "a") as f:
+            f.write("\n--- query ---\n")
+            f.write(qr.stderr)
+
+    # --- Clean up ---
+    if not args.keep_data and outfile.exists():
+        outfile.unlink()
+
+
+def _bench_lemonhash_str(cfg, method_name, dataset, rdir, args):
+    """Run a LeMonHashVL benchmark on a string dataset.
+
+    bench_lemonhash_str <file> <query_keys> <repeats>
+    Output goes to stderr.
+    """
+    cmd = [str(Path(REPO_ROOT) / "bench_lemonhash_str")]
+    qkeys = cfg.get("query_keys", QUERY_KEYS)
+    datafile = str(Path(DATA_DIR) / dataset)
+    cmd += [datafile, str(qkeys), "5"]
+
+    print(f"  bench {method_name} dataset={dataset}")
+    result = run_cmd(cmd, pin=args.pin, dry_run=args.dry_run)
+
+    if args.dry_run:
+        return
+
+    if result.returncode != 0:
+        (rdir / f"bench.{dataset}.0.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
+        return
+
+    output = result.stderr
+    (rdir / f"bench.{dataset}.0.err").write_text(output)
+
+    mem_size = parse_burr_size(output)
+    if mem_size is not None:
+        (rdir / f"bench.{dataset}.0.size").write_text(str(mem_size))
+
+
 def _bench_csf(cfg, method_name, n, log2_n, rdir, args):
     """Run a single CSF benchmark: build, serialize, query, delete.
 
@@ -1105,7 +1264,8 @@ def cmd_par_bench(args):
         if cfg["tool"] == "burr" and not burr_ok:
             print(f"Skipping {method_name} (BuRR not available)")
             continue
-        if cfg["tool"] in ("csf", "comp-vfunc", "phast", "mmphf", "lemonhash", "java"):
+        if cfg["tool"] in ("csf", "comp-vfunc", "phast", "mmphf", "lemonhash",
+                          "mmphf-str", "lemonhash-str", "java"):
             continue
         if cfg.get("bits_agnostic"):
             continue
@@ -1222,12 +1382,29 @@ def cmd_par_bench(args):
 # =====================================================================
 
 
+def _parse_n_from_build(text):
+    """Extract the key count from sux-rs build output.
+
+    Looks for lines like "Found N keys" or "(N keys," in the
+    construction summary.
+    """
+    import re
+    m = re.search(r'(?:Found|Loaded)\s+(\d+)\s+keys', text)
+    if m:
+        return int(m.group(1))
+    m = re.search(r'\((\d+)\s+keys', text)
+    if m:
+        return int(m.group(1))
+    return None
+
+
 def cmd_report(args):
     """Print a space-aligned report of available results to stdout.
 
     Columns:
-        n  bits  method  constr_ns  query_min  query_median  query_max
-        query_avg  parbench_med  bits_per_key  overhead_pct  file_bytes
+        n  dataset  bits  method  constr_ns  query_min  query_median
+        query_max  query_avg  parbench_med  bits_per_key  overhead_pct
+        file_bytes
 
     For filters (sux, burr), overhead_pct is relative to the bit width.
     For compressed functions (csf, comp-vfunc), it is relative to the
@@ -1239,8 +1416,8 @@ def cmd_report(args):
     methods = resolve_methods(args.method)
     bits_list = resolve_bits(args.bits)
 
-    cols = ["n", "bits", "method", "constr_ns", "query_min", "query_median",
-            "query_max", "query_avg", "parbench_med",
+    cols = ["n", "dataset", "bits", "method", "constr_ns", "query_min",
+            "query_median", "query_max", "query_avg", "parbench_med",
             "bits_per_key", "overhead_pct", "file_bytes"]
 
     rows = []
@@ -1250,9 +1427,48 @@ def cmd_report(args):
         if not rdir.exists():
             continue
 
-        max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
         tool_for_parse = _parse_tool(cfg["tool"])
-        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in ("csf", "comp-vfunc", "phast", "mmphf", "lemonhash"))
+
+        # String-dataset methods: scan the result directory.
+        if cfg["tool"] in ("mmphf-str", "lemonhash-str"):
+            import re
+            for f in sorted(rdir.iterdir()):
+                m = re.match(r'bench\.(.+)\.0\.err$', f.name)
+                if not m:
+                    continue
+                dataset = m.group(1)
+                text = f.read_text()
+                bd = parse_build(text, tool_for_parse)
+                qd = parse_query(text, tool_for_parse)
+
+                n = _parse_n_from_build(text)
+                n_str = str(n) if n else ""
+
+                size_file = rdir / f"bench.{dataset}.0.size"
+                file_bytes = ""
+                bpk = ""
+                if size_file.exists() and n:
+                    file_bytes = int(size_file.read_text().strip())
+                    bpk = f"{file_bytes * 8.0 / n:.2f}"
+
+                rows.append([
+                    n_str, dataset, "0", method_name,
+                    _fmt(bd.get("constr_ns")),
+                    _fmt(qd.get("query_min")),
+                    _fmt(qd.get("query_median")),
+                    _fmt(qd.get("query_max")),
+                    _fmt(qd.get("query_avg")),
+                    "",
+                    str(bpk),
+                    "",
+                    str(file_bytes),
+                ])
+            continue
+
+        # Standard size-based methods.
+        max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
+        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in (
+            "csf", "comp-vfunc", "phast", "mmphf", "lemonhash"))
         method_bits = [0] if bits_agnostic else bits_list
 
         entropy = distribution_entropy(cfg.get("distribution"))
@@ -1287,7 +1503,7 @@ def cmd_report(args):
                         overhead = f"{compute_overhead(file_bytes, n, entropy):.2f}"
 
                 rows.append([
-                    str(n), str(bits), method_name,
+                    str(n), "", str(bits), method_name,
                     _fmt(bd.get("constr_ns")),
                     _fmt(qd.get("query_min")),
                     _fmt(qd.get("query_median")),
@@ -1460,16 +1676,29 @@ def cmd_status(args):
     """Show a summary of completed and pending benchmark runs."""
     methods = resolve_methods(args.method)
     bits_list = resolve_bits(args.bits)
+    datasets = list_datasets()
 
     for method_name in methods:
         cfg = METHODS[method_name]
         rdir = Path(args.results_dir) / method_name
+        tool_for_parse = _parse_tool(cfg["tool"])
+
+        # String-dataset methods: count by dataset files.
+        if cfg["tool"] in ("mmphf-str", "lemonhash-str"):
+            total = len(datasets)
+            done = sum(
+                1 for d in datasets
+                if result_complete(rdir / f"bench.{d}.0.err", tool_for_parse)
+            )
+            print(f"{method_name:24s}  bench {done}/{total}")
+            continue
+
         max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
 
         done_bench, done_pq = 0, 0
         total = 0
-        tool_for_parse = _parse_tool(cfg["tool"])
-        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in ("csf", "comp-vfunc", "phast", "mmphf", "lemonhash"))
+        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in (
+            "csf", "comp-vfunc", "phast", "mmphf", "lemonhash"))
         method_bits = [0] if bits_agnostic else bits_list
 
         for bits in method_bits:
@@ -1541,11 +1770,18 @@ TABLES = {
     },
     "mmphf": {
         "methods": [
-            ("LcpMmphf", "LcpMmphf"),
-            ("Lcp2Mmphf", "Lcp2Mmphf"),
-            ("LeMonHash", "LeMonHash"),
+            ("LcpMmphfInt", "LcpMmphfInt"),
+            ("Lcp2MmphfInt", "Lcp2MmphfInt"),
+            ("LeMonHashInt", "LeMonHashInt"),
         ],
         "sizes": [1 << 20, 1 << 31],
+    },
+    "mmphf-str": {
+        "methods": [
+            ("LcpMmphfStr", "LcpMmphf"),
+            ("Lcp2MmphfStr", "Lcp2Mmphf"),
+            ("LeMonHashStr", "LeMonHash"),
+        ],
     },
     "comp": {
         "rows": [
@@ -1712,6 +1948,83 @@ def _table_mmphf(tbl, args):
                     query_val = f"{v:.1f}"
 
             if size_file.exists():
+                file_bytes = int(size_file.read_text().strip())
+                bpk_val = f"{file_bytes * 8.0 / n:.2f}"
+
+            row += f" & {constr_val} & {bpk_val} & {query_val}"
+
+        row += r" \\"
+        print(row)
+
+    print(r"\bottomrule")
+    print(r"\end{tabular}")
+
+
+def _table_mmphf_str(tbl, args):
+    """Render the 'mmphf-str' table: datasets as column groups, constr/bpk/query each."""
+    import re
+    # Discover datasets from result directories.
+    datasets = set()
+    for method_name, _ in tbl["methods"]:
+        rdir = Path(args.results_dir) / method_name
+        if not rdir.exists():
+            continue
+        for f in rdir.iterdir():
+            m = re.match(r'bench\.(.+)\.0\.err$', f.name)
+            if m:
+                datasets.add(m.group(1))
+    datasets = sorted(datasets)
+    if not datasets:
+        print("No string dataset results found.")
+        return
+
+    ndatasets = len(datasets)
+    cols_per_dataset = 3  # construction, bits/key, query
+
+    colspec = "l" + "||".join(["rrr"] * ndatasets)
+    print(r"\begin{tabular}{" + colspec + "}")
+    print(r"\toprule")
+
+    hdr1 = ""
+    for d in datasets:
+        safe = d.replace("_", r"\_")
+        hdr1 += f" & \\multicolumn{{{cols_per_dataset}}}{{c}}{{\\texttt{{{safe}}}}}"
+    print(hdr1 + r" \\")
+
+    sub_hdr = " & Constr. & Bits/key & Query" * ndatasets
+    print(sub_hdr + r" \\")
+    print(r"\midrule")
+
+    for method_name, label in tbl["methods"]:
+        if method_name not in METHODS:
+            continue
+        cfg = METHODS[method_name]
+        rdir = Path(args.results_dir) / method_name
+        tool_for_parse = _parse_tool(cfg["tool"])
+
+        row = label
+        for dataset in datasets:
+            bench_err = rdir / f"bench.{dataset}.0.err"
+            size_file = rdir / f"bench.{dataset}.0.size"
+
+            constr_val = ""
+            bpk_val = ""
+            query_val = ""
+
+            n = None
+            if bench_err.exists():
+                text = bench_err.read_text()
+                bd = parse_build(text, tool_for_parse)
+                qd = parse_query(text, tool_for_parse)
+                n = _parse_n_from_build(text)
+                v = bd.get("constr_ns")
+                if v is not None:
+                    constr_val = f"{v:.1f}"
+                v = qd.get("query_min")
+                if v is not None:
+                    query_val = f"{v:.1f}"
+
+            if size_file.exists() and n:
                 file_bytes = int(size_file.read_text().strip())
                 bpk_val = f"{file_bytes * 8.0 / n:.2f}"
 
@@ -1931,6 +2244,8 @@ def cmd_table(args):
 
     if args.table == "mmphf":
         _table_mmphf(tbl, args)
+    elif args.table == "mmphf-str":
+        _table_mmphf_str(tbl, args)
     elif args.table == "comp":
         _table_comp(tbl, args)
     elif args.table == "java":

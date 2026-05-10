@@ -5,8 +5,12 @@ This module defines the benchmark matrix: which methods to test, with what
 parameters, and how they map to paper figures.
 
 Each entry in METHODS specifies:
-  - tool: "sux" and "burr" (filter), "csf", and
-    "comp-vfunc" (compressed functions)
+  - tool: "sux" (VFilter/VFunc), "burr" (BuRR ribbon), "csf"
+    (BuRR-VL compressed static functions), "comp-vfunc" (sux-rs
+    CompVFunc), "phast" (PHast+), "mmphf" (monotone MMPHF, integer
+    keys), "mmphf-str" (monotone MMPHF, string keys), "lemonhash"
+    (LeMonHash, integer keys), "lemonhash-str" (LeMonHash, string
+    keys), "java" (Sux4J GOV3)
 
   - How to build the structure and how to query it - Default size
     ranges and special flags
@@ -256,7 +260,7 @@ METHODS = {
         "max_log2": 32,
     },
     # -----------------------------------------------------------------
-    # Monotone MMPHF methods
+    # Monotone MMPHF methods (integer keys)
     # -----------------------------------------------------------------
     #
     # All use sorted random 64-bit keys (same generation algorithm).
@@ -267,27 +271,59 @@ METHODS = {
     #
     # LeMonHash: uses bench_lemonhash (C++, cmake-built).
     #   Run:  bench_lemonhash <n> <query_keys> <repeats>
-    "LcpMmphf": {
+    "LcpMmphfInt": {
         "tool": "mmphf",
-        "label": "LcpMmphf",
+        "label": "LcpMmphf(int)",
         "variant": "lcp",
         "build_threads": 1,
         "query_keys": 10_000_000,
         "max_log2": 30,
     },
-    "Lcp2Mmphf": {
+    "Lcp2MmphfInt": {
         "tool": "mmphf",
-        "label": "Lcp2Mmphf",
+        "label": "Lcp2Mmphf(int)",
         "variant": "lcp2",
         "build_threads": 1,
         "query_keys": 10_000_000,
         "max_log2": 30,
     },
-    "LeMonHash": {
+    "LeMonHashInt": {
         "tool": "lemonhash",
-        "label": "LeMonHash",
+        "label": "LeMonHash(int)",
         "query_keys": 10_000_000,
         "max_log2": 30,
+    },
+    # -----------------------------------------------------------------
+    # Monotone MMPHF methods (string keys from data/ directory)
+    # -----------------------------------------------------------------
+    #
+    # These iterate over sorted string datasets in the data/ directory
+    # instead of using generated integer keys.  Skipped if data/ is
+    # absent or empty.
+    #
+    # LcpMmphfStr/Lcp2MmphfStr: build with lcp_mmphf -f, query with
+    #   bench_lcp_mmphf -f.
+    #
+    # LeMonHashStr: uses bench_lemonhash_str (C++, cmake-built).
+    #   Run:  bench_lemonhash_str <file> <query_keys> <repeats>
+    "LcpMmphfStr": {
+        "tool": "mmphf-str",
+        "label": "LcpMmphf(str)",
+        "variant": "lcp",
+        "build_threads": 1,
+        "query_keys": 10_000_000,
+    },
+    "Lcp2MmphfStr": {
+        "tool": "mmphf-str",
+        "label": "Lcp2Mmphf(str)",
+        "variant": "lcp2",
+        "build_threads": 1,
+        "query_keys": 10_000_000,
+    },
+    "LeMonHashStr": {
+        "tool": "lemonhash-str",
+        "label": "LeMonHash(str)",
+        "query_keys": 10_000_000,
     },
     # -----------------------------------------------------------------
     # Sux4J GOV3 methods (Java build + C query)
@@ -415,17 +451,17 @@ FIGURES = {
         "column": "query_min",
         "ylabel": "ns/key",
     },
-    # --- Monotone MMPHF comparison ---
+    # --- Monotone MMPHF comparison (integer keys) ---
     # Bits-agnostic: mmphf-build.pdf, mmphf-query.pdf.
     "mmphf-build": {
         "title": "Monotone MMPHF Construction",
-        "methods": ["LcpMmphf", "Lcp2Mmphf", "LeMonHash"],
+        "methods": ["LcpMmphfInt", "Lcp2MmphfInt", "LeMonHashInt"],
         "column": "constr_ns",
         "ylabel": "ns/key",
     },
     "mmphf-query": {
         "title": "Monotone MMPHF Queries",
-        "methods": ["LcpMmphf", "Lcp2Mmphf", "LeMonHash"],
+        "methods": ["LcpMmphfInt", "Lcp2MmphfInt", "LeMonHashInt"],
         "column": "query_min",
         "ylabel": "ns/key",
     },
