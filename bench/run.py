@@ -238,7 +238,19 @@ def ensure_burr_built(burr_dir, bits_values):
         return False
 
     # GCC 15+ miscompiles LeMonHash/SimpleRibbon at -O3 without -fno-strict-aliasing
+    #
+    # The BuRR Makefile's bench target uses wildcard header deps that
+    # cause unconditional rebuilds.  We check source timestamps ourselves
+    # and skip if the binary is newer than all sources.
+    src_mtime = max(
+        (f.stat().st_mtime for f in burr.iterdir()
+         if f.suffix in (".cpp", ".hpp") or f.name == "Makefile"),
+        default=0.0,
+    )
     for bits in bits_values:
+        binary = burr / f"bench{bits}"
+        if binary.exists() and binary.stat().st_mtime >= src_mtime:
+            continue
         print(f"Building BuRR bench{bits} in {burr}…")
         r = subprocess.run(
             ["make", f"RIBBON_BITS={bits}",
