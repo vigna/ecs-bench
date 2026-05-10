@@ -72,7 +72,7 @@ static std::vector<std::string> reservoir_sample(const char *path, size_t n,
 // the queries vector.  Guarantees exactly n entries in the output.
 static void pack_strings(const std::vector<std::string> &queries, size_t n,
                           std::vector<char> &packed,
-                          std::vector<uint32_t> &offsets) {
+                          std::vector<size_t> &offsets) {
   packed.clear();
   offsets.clear();
   offsets.reserve(n + 1);
@@ -80,7 +80,7 @@ static void pack_strings(const std::vector<std::string> &queries, size_t n,
   for (size_t i = 0; i < n; i++) {
     auto &s = queries[i % queries.size()];
     packed.insert(packed.end(), s.begin(), s.end());
-    offsets.push_back(static_cast<uint32_t>(packed.size()));
+    offsets.push_back(packed.size());
   }
 }
 
@@ -132,7 +132,7 @@ int main(int argc, char **argv) {
 
   // Reservoir-sample query strings and pack into a contiguous buffer
   std::vector<char> packed;
-  std::vector<uint32_t> offsets;
+  std::vector<size_t> offsets;
   {
     auto queries = reservoir_sample(file, query_keys, 42);
     pack_strings(queries, query_keys, packed, offsets);
