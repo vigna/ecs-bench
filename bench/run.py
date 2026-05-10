@@ -51,6 +51,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from configs import (  # noqa: E402
     ALL_BITS,
+    BITS_AGNOSTIC_TOOLS,
     DEFAULT_PAR_JOBS,
     DEFAULT_THREADS,
     EVEN_BITS,
@@ -735,8 +736,7 @@ def cmd_bench(args):
             continue
 
         max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
-        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in (
-            "csf", "comp-vfunc", "phast", "mmphf", "lemonhash"))
+        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in BITS_AGNOSTIC_TOOLS)
         method_bits = [0] if bits_agnostic else bits_list
 
         explicit_sizes = cfg.get("sizes")
@@ -905,8 +905,10 @@ def _bench_phast(cfg, method_name, n, log2_n, rdir, args):
         threads = args.threads
     cmd += [str(threads or 1)]
 
+    # PHast+ builds and queries in a single process, so we run unpinned
+    # (pinning would force multi-threaded construction onto one core).
     print(f"  bench {method_name} n=2^{log2_n}")
-    result = run_cmd(cmd, pin=args.pin, dry_run=args.dry_run)
+    result = run_cmd(cmd, dry_run=args.dry_run)
 
     if args.dry_run:
         return
@@ -1230,7 +1232,7 @@ def _bench_java(cfg, method_name, n, bits, log2_n, rdir, args):
             f.write(qr.stdout)
 
     # --- Clean up ---
-    if not getattr(args, 'keep_data', False) and outfile.exists():
+    if not args.keep_data and outfile.exists():
         outfile.unlink()
 
 
@@ -1246,8 +1248,8 @@ def cmd_par_bench(args):
       1. Build the structure and serialize it to disk.
       2. Launch --jobs query instances via GNU parallel, all reading
          the same serialized file.
-      3. Extract the worst-case (maximum) query Max across all
-         instances — this measures memory-contention impact.
+      3. Compute the median of per-instance median query times — this
+         represents typical throughput under memory contention.
       4. Delete the serialized file and per-instance outputs.
 
     For sux-rs: build with vfilter, query with bench_vfilter × jobs.
@@ -1480,16 +1482,18 @@ def cmd_report(args):
 
         # Standard size-based methods.
         max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
-        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in (
-            "csf", "comp-vfunc", "phast", "mmphf", "lemonhash"))
+        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in BITS_AGNOSTIC_TOOLS)
         method_bits = [0] if bits_agnostic else bits_list
 
         entropy = distribution_entropy(cfg.get("distribution"))
 
+        explicit_sizes = cfg.get("sizes")
         for bits in method_bits:
-            for log2_n in range(MIN_LOG2, max_log2 + 1):
-                n = 1 << log2_n
-
+            if explicit_sizes is not None:
+                sizes = explicit_sizes
+            else:
+                sizes = [1 << log2 for log2 in range(MIN_LOG2, max_log2 + 1)]
+            for n in sizes:
                 bench_err = rdir / f"bench.{n}.{bits}.err"
                 if not bench_err.exists():
                     continue
@@ -1586,7 +1590,7 @@ def _plot_one(figure_name, args, plt):
     col = fig_cfg["column"]
 
     all_agnostic = all(
-        METHODS[m].get("bits_agnostic", METHODS[m]["tool"] in ("csf", "comp-vfunc", "phast", "mmphf", "lemonhash"))
+        METHODS[m].get("bits_agnostic", METHODS[m]["tool"] in BITS_AGNOSTIC_TOOLS)
         for m in fig_cfg["methods"] if m in METHODS
     )
     if all_agnostic:
@@ -1710,13 +1714,16 @@ def cmd_status(args):
 
         done_bench, done_pq = 0, 0
         total = 0
-        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in (
-            "csf", "comp-vfunc", "phast", "mmphf", "lemonhash"))
+        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in BITS_AGNOSTIC_TOOLS)
         method_bits = [0] if bits_agnostic else bits_list
 
+        explicit_sizes = cfg.get("sizes")
         for bits in method_bits:
-            for log2_n in range(MIN_LOG2, max_log2 + 1):
-                n = 1 << log2_n
+            if explicit_sizes is not None:
+                sizes = explicit_sizes
+            else:
+                sizes = [1 << log2 for log2 in range(MIN_LOG2, max_log2 + 1)]
+            for n in sizes:
                 total += 1
                 if result_complete(rdir / f"bench.{n}.{bits}.err", tool_for_parse):
                     done_bench += 1

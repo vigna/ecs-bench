@@ -50,6 +50,13 @@ SUX_FEATURES = "cli,mwhc,rayon,epserde,deko"
 # Cargo profile used for benchmark builds.
 SUX_PROFILE = "bench"
 
+# Tool types whose results are bits-agnostic (bits/key is a result
+# metric, not a build parameter).  Used as the default when a method
+# does not set "bits_agnostic" explicitly.
+BITS_AGNOSTIC_TOOLS = frozenset({
+    "csf", "comp-vfunc", "phast", "mmphf", "lemonhash", "java",
+})
+
 # --- Method definitions ---
 
 METHODS = {
