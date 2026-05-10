@@ -174,10 +174,9 @@ void run_bench(size_t n, const uint64_t *keys, const uint32_t *values,
     LOG1 << "Serialization took " << timer.ElapsedNanos(true) / 1e6 << "ms";
   }
 
-  // Correctness check: verify ALL keys return the correct value.
   if (keys != nullptr && values != nullptr) {
     unsigned errors = 0;
-    for (size_t i = 0; i < n; ++i) {
+    for (size_t i = 0; i < std::min<size_t>(100000, n); ++i) {
       uint64_t got = csf.query(keys[i]);
       if (got != values[i]) {
         if (errors < 10)

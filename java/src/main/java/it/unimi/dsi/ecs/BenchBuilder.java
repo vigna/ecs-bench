@@ -91,11 +91,14 @@ public class BenchBuilder {
 			final String output = args[3];
 
 			System.err.println("Building GOV3Function: n=" + n + " bits=" + bits);
+			long t0 = System.nanoTime();
 			final GOV3Function<byte[]> f = new GOV3Function.Builder<byte[]>()
 				.keys(keys)
 				.transform(TransformationStrategies.rawByteArray())
 				.dictionary(bits)
 				.build();
+			long elapsed = System.nanoTime() - t0;
+			System.err.println("Construction completed in " + (elapsed / 1e9) + " seconds (" + n + " keys, " + ((double)elapsed / n) + " ns/key)");
 
 			System.err.println("Dumping to " + output);
 			f.dump(output);
@@ -123,12 +126,15 @@ public class BenchBuilder {
 			}
 
 			System.err.println("Building GV3CompressedFunction: n=" + n + " dist=" + distFlag);
+			long t0 = System.nanoTime();
 			final GV3CompressedFunction<byte[]> f = new GV3CompressedFunction.Builder<byte[]>()
 				.keys(keys)
 				.transform(TransformationStrategies.rawByteArray())
 				.values(values)
 				.codec(new Codec.Huffman(20, 1))
 				.build();
+			long elapsed = System.nanoTime() - t0;
+			System.err.println("Construction completed in " + (elapsed / 1e9) + " seconds (" + n + " keys, " + ((double)elapsed / n) + " ns/key)");
 
 			System.err.println("Dumping to " + output);
 			f.dump(output);

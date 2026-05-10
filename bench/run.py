@@ -931,7 +931,7 @@ def _bench_mmphf(cfg, method_name, n, log2_n, rdir, args):
     ddir = data_dir(args.results_dir, method_name)
     outfile = ddir / f"func.{n}.bin"
 
-    # --- Build (unpinned) ---
+    # --- Build (pinned — single-threaded, so pinning is fine) ---
     cmd = [str(target / "release" / "lcp_mmphf")]
     cmd += ["-n", str(n)]
     cmd += ["--unaligned"]
@@ -941,7 +941,7 @@ def _bench_mmphf(cfg, method_name, n, log2_n, rdir, args):
     cmd += [str(outfile)]
 
     print(f"  bench {method_name} n=2^{log2_n}")
-    result = run_cmd(cmd, dry_run=args.dry_run)
+    result = run_cmd(cmd, pin=args.pin, dry_run=args.dry_run)
 
     # --- Query (pinned, only if build succeeded) ---
     qkeys = cfg.get("query_keys", QUERY_KEYS)

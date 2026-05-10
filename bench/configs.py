@@ -33,8 +33,8 @@ ALL_BITS = sorted(EVEN_BITS + ODD_BITS)
 # Starting size exponent: 2^20 ≈ 1M keys.
 MIN_LOG2 = 20
 
-# Number of query operations per benchmark run. All methods use the same
-# count so that per-query timing is directly comparable.
+# Default number of query operations per benchmark run.  Monotone MMPHF
+# and LeMonHash methods override this via per-method "query_keys" configs.
 QUERY_KEYS = 100_000_000
 
 import os
