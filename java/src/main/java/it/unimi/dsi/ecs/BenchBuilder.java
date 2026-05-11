@@ -99,6 +99,7 @@ public class BenchBuilder {
 				.build();
 			long elapsed = System.nanoTime() - t0;
 			System.err.println("Construction completed in " + (elapsed / 1e9) + " seconds (" + n + " keys, " + ((double)elapsed / n) + " ns/key)");
+			System.err.println("Bits/key: " + ((double) f.numBits() / n));
 
 			System.err.println("Dumping to " + output);
 			f.dump(output);
@@ -135,6 +136,7 @@ public class BenchBuilder {
 				.build();
 			long elapsed = System.nanoTime() - t0;
 			System.err.println("Construction completed in " + (elapsed / 1e9) + " seconds (" + n + " keys, " + ((double)elapsed / n) + " ns/key)");
+			System.err.println("Bits/key: " + ((double) f.numBits() / n));
 
 			System.err.println("Dumping to " + output);
 			f.dump(output);

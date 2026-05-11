@@ -63,8 +63,8 @@ from configs import (  # noqa: E402
     SUX_FEATURES,
     SUX_PROFILE,
 )
-from parse import (compute_overhead, distribution_entropy, parse_build,
-                    parse_burr_size, parse_query)
+from parse import (compute_overhead, distribution_entropy, parse_bits_per_key,
+                    parse_build, parse_query)
 
 # Repo root: bench/ is one level below the repository root, which
 # contains the sux-rs/ and BuRR/ submodules.
@@ -164,19 +164,44 @@ def data_dir(base, method):
     return d
 
 
+def size_check(outfile, n, text):
+    """Verify on-disk size against self-reported in-memory bits/key.
+
+    Builders log a ``Bits/key:`` (or ``Size: N Bytes = X bits/key``)
+    line; ε-serde / Sux4J / BuRR / CSF then dump the structure to a file
+    of comparable size.  Mismatches over 1% suggest serialization
+    overhead or a counting bug worth flagging.
+
+    Returns a one-line warning string, or None when the check passes
+    (or cannot be performed: file missing, no bits/key in log, n ≤ 0).
+    """
+    if outfile is None or not outfile.exists() or n is None or n <= 0:
+        return None
+    bpk = parse_bits_per_key(text, n)
+    if bpk is None or bpk <= 0:
+        return None
+    file_bytes = outfile.stat().st_size
+    expected = bpk * n / 8.0
+    rel = abs(file_bytes - expected) / expected
+    if rel <= 0.01:
+        return None
+    return (f"WARNING: file size {file_bytes} B differs by {rel*100:.2f}% "
+            f"from self-reported {bpk:.3f} bits/key "
+            f"(expected ~{expected:.0f} B)\n")
+
+
 def par_query_limit(bits):
     """Maximum n for which parallel queries are feasible.
 
     With 96 instances each mapping the structure, the total memory is
-    roughly 96 × file_size.  The old scripts capped this at
-    (2^30 × 8) / effective_bits, where effective_bits rounds down to
-    the nearest multiple of 8 (so 9→8, 17→16, 33→32).  This keeps
-    total memory under ~96 GB.
+    roughly 96 × file_size, and the file is bit-packed at exactly
+    ``bits`` bits/key (Box<[u8/u16/u32]> for power-of-2 widths,
+    BitFieldVec<Box<[u64]>> otherwise).  Cap aggregate memory at ~96 GB
+    by requiring n × bits ≤ 2^33 bits, i.e. n ≤ 2^33 / bits.
     """
-    effective = (bits // 8) * 8
-    if effective == 0:
+    if bits <= 0:
         return 0
-    return (1 << 30) * 8 // effective
+    return (1 << 33) // bits
 
 
 # =====================================================================
@@ -829,14 +854,16 @@ def _bench_burr(cfg, method_name, n, bits, log2_n, rdir, args):
         return
 
     build_output = result.stdout
-    (rdir / f"bench.{n}.{bits}.err").write_text(build_output)
+    err_path = rdir / f"bench.{n}.{bits}.err"
+    err_path.write_text(build_output)
 
-    mem_size = parse_burr_size(build_output)
-    if mem_size is not None:
-        (rdir / f"bench.{n}.{bits}.size").write_text(str(mem_size))
+    warn = size_check(outfile, n, build_output)
+    if warn is not None:
+        with open(err_path, "a") as f:
+            f.write(warn)
 
     if qr is not None and qr.returncode == 0:
-        with open(rdir / f"bench.{n}.{bits}.err", "a") as f:
+        with open(err_path, "a") as f:
             f.write("\n--- query ---\n")
             f.write(qr.stdout)
 
@@ -874,14 +901,16 @@ def _bench_comp_vfunc(cfg, method_name, n, log2_n, rdir, args):
             (result.stdout or "") + (result.stderr or ""))
         return
 
-    (rdir / f"bench.{n}.0.err").write_text(build_output)
+    err_path = rdir / f"bench.{n}.0.err"
+    err_path.write_text(build_output)
 
-    if outfile.exists():
-        (rdir / f"bench.{n}.0.size").write_text(
-            str(outfile.stat().st_size))
+    warn = size_check(outfile, n, build_output)
+    if warn is not None:
+        with open(err_path, "a") as f:
+            f.write(warn)
 
     if qr is not None and qr.returncode == 0:
-        with open(rdir / f"bench.{n}.0.err", "a") as f:
+        with open(err_path, "a") as f:
             f.write("\n--- query ---\n")
             f.write(qr.stderr)
 
@@ -966,14 +995,16 @@ def _bench_mmphf(cfg, method_name, n, log2_n, rdir, args):
             (result.stdout or "") + (result.stderr or ""))
         return
 
-    (rdir / f"bench.{n}.0.err").write_text(build_output)
+    err_path = rdir / f"bench.{n}.0.err"
+    err_path.write_text(build_output)
 
-    if outfile.exists():
-        (rdir / f"bench.{n}.0.size").write_text(
-            str(outfile.stat().st_size))
+    warn = size_check(outfile, n, build_output)
+    if warn is not None:
+        with open(err_path, "a") as f:
+            f.write(warn)
 
     if qr is not None and qr.returncode == 0:
-        with open(rdir / f"bench.{n}.0.err", "a") as f:
+        with open(err_path, "a") as f:
             f.write("\n--- query ---\n")
             f.write(qr.stderr)
 
@@ -1005,10 +1036,6 @@ def _bench_lemonhash(cfg, method_name, n, log2_n, rdir, args):
 
     output = result.stderr
     (rdir / f"bench.{n}.0.err").write_text(output)
-
-    mem_size = parse_burr_size(output)
-    if mem_size is not None:
-        (rdir / f"bench.{n}.0.size").write_text(str(mem_size))
 
 
 def _bench_mmphf_str(cfg, method_name, dataset, rdir, args):
@@ -1059,14 +1086,18 @@ def _bench_mmphf_str(cfg, method_name, dataset, rdir, args):
             (result.stdout or "") + (result.stderr or ""))
         return
 
-    (rdir / f"bench.{dataset}.0.err").write_text(build_output)
+    err_path = rdir / f"bench.{dataset}.0.err"
+    err_path.write_text(build_output)
 
-    if outfile.exists():
-        (rdir / f"bench.{dataset}.0.size").write_text(
-            str(outfile.stat().st_size))
+    # For string datasets we don't know n upfront; parse it from the log.
+    n = _parse_n_from_build(build_output)
+    warn = size_check(outfile, n, build_output) if n else None
+    if warn is not None:
+        with open(err_path, "a") as f:
+            f.write(warn)
 
     if qr is not None and qr.returncode == 0:
-        with open(rdir / f"bench.{dataset}.0.err", "a") as f:
+        with open(err_path, "a") as f:
             f.write("\n--- query ---\n")
             f.write(qr.stderr)
 
@@ -1100,10 +1131,6 @@ def _bench_lemonhash_str(cfg, method_name, dataset, rdir, args):
     output = result.stderr
     (rdir / f"bench.{dataset}.0.err").write_text(output)
 
-    mem_size = parse_burr_size(output)
-    if mem_size is not None:
-        (rdir / f"bench.{dataset}.0.size").write_text(str(mem_size))
-
 
 def _bench_csf(cfg, method_name, n, log2_n, rdir, args):
     """Run a single CSF benchmark: build, serialize, query, delete.
@@ -1134,14 +1161,16 @@ def _bench_csf(cfg, method_name, n, log2_n, rdir, args):
             (result.stdout or "") + (result.stderr or ""))
         return
 
-    (rdir / f"bench.{n}.0.err").write_text(build_output)
+    err_path = rdir / f"bench.{n}.0.err"
+    err_path.write_text(build_output)
 
-    mem_size = parse_burr_size(build_output)
-    if mem_size is not None:
-        (rdir / f"bench.{n}.0.size").write_text(str(mem_size))
+    warn = size_check(outfile, n, build_output)
+    if warn is not None:
+        with open(err_path, "a") as f:
+            f.write(warn)
 
     if qr is not None and qr.returncode == 0:
-        with open(rdir / f"bench.{n}.0.err", "a") as f:
+        with open(err_path, "a") as f:
             f.write("\n--- query ---\n")
             f.write(qr.stdout)
 
@@ -1165,12 +1194,13 @@ def _bench_sux(cfg, method_name, n, bits, log2_n, rdir, args):
     print(f"  bench {method_name} n=2^{log2_n}{bits_str}")
     result = run_cmd(cmd, dry_run=args.dry_run)
 
-    # --- Query (pinned, only if build succeeded) ---
+    # --- Query (pinned by default; see cfg["pin_query"]) ---
     qr = None
     if not cfg.get("no_queries"):
         qcmd = sux_query_cmd(cfg, n, bits, outfile, args)
         if args.dry_run or result.returncode == 0:
-            qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
+            pin = args.pin if cfg.get("pin_query", True) else None
+            qr = run_cmd(qcmd, pin=pin, dry_run=args.dry_run)
 
     if args.dry_run:
         return
@@ -1181,14 +1211,16 @@ def _bench_sux(cfg, method_name, n, bits, log2_n, rdir, args):
             (result.stdout or "") + (result.stderr or ""))
         return
 
-    (rdir / f"bench.{n}.{bits}.err").write_text(build_output)
+    err_path = rdir / f"bench.{n}.{bits}.err"
+    err_path.write_text(build_output)
 
-    if outfile.exists():
-        (rdir / f"bench.{n}.{bits}.size").write_text(
-            str(outfile.stat().st_size))
+    warn = size_check(outfile, n, build_output)
+    if warn is not None:
+        with open(err_path, "a") as f:
+            f.write(warn)
 
     if qr is not None and qr.returncode == 0:
-        with open(rdir / f"bench.{n}.{bits}.err", "a") as f:
+        with open(err_path, "a") as f:
             f.write("\n--- query ---\n")
             f.write(qr.stderr)
 
@@ -1220,18 +1252,21 @@ def _bench_java(cfg, method_name, n, bits, log2_n, rdir, args):
         (rdir / f"bench.{n}.{bits}.err").write_text(err_text)
         return
 
-    (rdir / f"bench.{n}.{bits}.err").write_text(result.stderr or "")
+    err_path = rdir / f"bench.{n}.{bits}.err"
+    build_output = result.stderr or ""
+    err_path.write_text(build_output)
 
-    if outfile.exists():
-        (rdir / f"bench.{n}.{bits}.size").write_text(
-            str(outfile.stat().st_size))
+    warn = size_check(outfile, n, build_output)
+    if warn is not None:
+        with open(err_path, "a") as f:
+            f.write(warn)
 
     # --- C query (pinned) ---
     qcmd = java_query_cmd(cfg, bits, outfile)
     qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
 
     if qr is not None and qr.returncode == 0:
-        with open(rdir / f"bench.{n}.{bits}.err", "a") as f:
+        with open(err_path, "a") as f:
             f.write("\n--- query ---\n")
             f.write(qr.stdout)
 
@@ -1368,7 +1403,11 @@ def cmd_par_bench(args):
             print(f"  WARNING: parallel returned {r.returncode}",
                   file=sys.stderr)
 
-        # Aggregate: median of per-instance median times.
+        # Aggregate: honest Min/Median/Max/Average over the
+        # per-instance medians.  Each instance reports its own
+        # Min/Median/Max/Average over its 5 repeats; we keep the median
+        # of those (the representative per-instance time) and then
+        # summarize the distribution across instances.
         medians = []
         for i in range(args.jobs):
             ifile = instance_dir / f"{i}.err"
@@ -1379,13 +1418,16 @@ def cmd_par_bench(args):
                 medians.append(qdata["query_median"])
         medians.sort()
         if medians:
-            med = medians[len(medians) // 2]
+            agg_min = medians[0]
+            agg_med = medians[len(medians) // 2]
+            agg_max = medians[-1]
+            agg_avg = sum(medians) / len(medians)
         else:
-            med = 0.0
+            agg_min = agg_med = agg_max = agg_avg = 0.0
 
         agg_err.write_text(
-            f"Min: {med} Median: {med} "
-            f"Max: {med} Average: {med}\n"
+            f"Min: {agg_min} Median: {agg_med} "
+            f"Max: {agg_max} Average: {agg_avg}\n"
         )
 
         # --- Clean up ---
@@ -1423,7 +1465,6 @@ def cmd_report(args):
     Columns:
         n  dataset  bits  method  constr_ns  query_min  query_median
         query_max  query_avg  parbench_med  bits_per_key  overhead_pct
-        file_bytes
 
     For filters (sux, burr), overhead_pct is relative to the bit width.
     For compressed functions (csf, comp-vfunc), it is relative to the
@@ -1437,7 +1478,7 @@ def cmd_report(args):
 
     cols = ["n", "dataset", "bits", "method", "constr_ns", "query_min",
             "query_median", "query_max", "query_avg", "parbench_med",
-            "bits_per_key", "overhead_pct", "file_bytes"]
+            "bits_per_key", "overhead_pct"]
 
     rows = []
     for method_name in methods:
@@ -1463,12 +1504,8 @@ def cmd_report(args):
                 n = _parse_n_from_build(text)
                 n_str = str(n) if n else ""
 
-                size_file = rdir / f"bench.{dataset}.0.size"
-                file_bytes = ""
-                bpk = ""
-                if size_file.exists() and n:
-                    file_bytes = int(size_file.read_text().strip())
-                    bpk = f"{file_bytes * 8.0 / n:.2f}"
+                bpk_val = parse_bits_per_key(text, n)
+                bpk = f"{bpk_val:.2f}" if bpk_val is not None else ""
 
                 rows.append([
                     n_str, dataset, "0", method_name,
@@ -1478,9 +1515,8 @@ def cmd_report(args):
                     _fmt(qd.get("query_max")),
                     _fmt(qd.get("query_avg")),
                     "",
-                    str(bpk),
+                    bpk,
                     "",
-                    str(file_bytes),
                 ])
             continue
 
@@ -1511,17 +1547,14 @@ def cmd_report(args):
                     pqd = parse_query(pq_err.read_text(), tool_for_parse)
                     pq_med = pqd.get("query_median", "")
 
-                size_file = rdir / f"bench.{n}.{bits}.size"
-                file_bytes = ""
-                bpk = ""
+                bpk_val = parse_bits_per_key(text, n)
+                bpk = f"{bpk_val:.2f}" if bpk_val is not None else ""
                 overhead = ""
-                if size_file.exists():
-                    file_bytes = int(size_file.read_text().strip())
-                    bpk = f"{file_bytes * 8.0 / n:.2f}"
+                if bpk_val is not None:
                     if bits > 0:
-                        overhead = f"{compute_overhead(file_bytes, n, bits):.2f}"
+                        overhead = f"{compute_overhead(bpk_val, bits):.2f}"
                     elif entropy is not None:
-                        overhead = f"{compute_overhead(file_bytes, n, entropy):.2f}"
+                        overhead = f"{compute_overhead(bpk_val, entropy):.2f}"
 
                 rows.append([
                     str(n), "", str(bits), method_name,
@@ -1531,9 +1564,8 @@ def cmd_report(args):
                     _fmt(qd.get("query_max")),
                     _fmt(qd.get("query_avg")),
                     _fmt(pq_med),
-                    str(bpk),
-                    str(overhead),
-                    str(file_bytes),
+                    bpk,
+                    overhead,
                 ])
 
     widths = [len(c) for c in cols]
@@ -1731,7 +1763,9 @@ def cmd_status(args):
                 total += 1
                 if result_complete(rdir / f"bench.{n}.{bits}.err", tool_for_parse):
                     done_bench += 1
-                if (rdir / f"parbench.{n}.{bits}.err").exists():
+                pq_path = rdir / f"parbench.{n}.{bits}.err"
+                if pq_path.exists() and "query_min" in parse_query(
+                        pq_path.read_text(), tool_for_parse):
                     done_pq += 1
 
         print(f"{method_name:24s}  bench {done_bench}/{total}"
@@ -1874,13 +1908,18 @@ def _filter_query_row(label, variants, bits_order, n, args):
             continue
         rdir = Path(args.results_dir) / method_name
         tool_for_parse = _parse_tool(cfg["tool"])
-        prefix = "parbench" if mode == "query_par" else "bench"
+        is_par = mode == "query_par"
+        prefix = "parbench" if is_par else "bench"
+        # parbench files summarize per-instance medians (no real Min);
+        # bench files have honest 5-repeat stats.  Use the meaningful
+        # column in each case.
+        col = "query_median" if is_par else "query_min"
         for bits in bits_order:
             bench_err = rdir / f"{prefix}.{n}.{bits}.err"
             val = ""
             if bench_err.exists():
                 d = parse_query(bench_err.read_text(), tool_for_parse)
-                v = d.get("query_min")
+                v = d.get(col)
                 if v is not None:
                     val = f"{v:.1f}"
             row += f" & {val}"
@@ -1954,7 +1993,6 @@ def _table_mmphf(tbl, args):
         row = label
         for n in sizes:
             bench_err = rdir / f"bench.{n}.0.err"
-            size_file = rdir / f"bench.{n}.0.size"
 
             constr_val = ""
             bpk_val = ""
@@ -1970,10 +2008,9 @@ def _table_mmphf(tbl, args):
                 v = qd.get("query_min")
                 if v is not None:
                     query_val = f"{v:.1f}"
-
-            if size_file.exists():
-                file_bytes = int(size_file.read_text().strip())
-                bpk_val = f"{file_bytes * 8.0 / n:.2f}"
+                bpk = parse_bits_per_key(text, n)
+                if bpk is not None:
+                    bpk_val = f"{bpk:.2f}"
 
             row += f" & {constr_val} & {bpk_val} & {query_val}"
 
@@ -2039,7 +2076,6 @@ def _table_mmphf_str(tbl, args):
         row = label
         for dataset in datasets:
             bench_err = rdir / f"bench.{dataset}.0.err"
-            size_file = rdir / f"bench.{dataset}.0.size"
 
             constr_val = ""
             bpk_val = ""
@@ -2057,10 +2093,9 @@ def _table_mmphf_str(tbl, args):
                 v = qd.get("query_min")
                 if v is not None:
                     query_val = f"{v:.0f}"
-
-            if size_file.exists() and n:
-                file_bytes = int(size_file.read_text().strip())
-                bpk_val = f"{file_bytes * 8.0 / n:.2f}"
+                bpk = parse_bits_per_key(text, n)
+                if bpk is not None:
+                    bpk_val = f"{bpk:.2f}"
 
             row += f" & {constr_val} & {bpk_val} & {query_val}"
 
@@ -2105,7 +2140,6 @@ def _table_comp(tbl, args):
                 tool_for_parse = _parse_tool(cfg["tool"])
 
                 bench_err = rdir / f"bench.{n}.0.err"
-                size_file = rdir / f"bench.{n}.0.size"
                 constr_val = ""
                 bpk_val = ""
                 query_val = ""
@@ -2120,10 +2154,9 @@ def _table_comp(tbl, args):
                     v = qd.get("query_min")
                     if v is not None:
                         query_val = f"{v:.1f}"
-
-                if size_file.exists():
-                    file_bytes = int(size_file.read_text().strip())
-                    bpk_val = f"{file_bytes * 8.0 / n:.2f}"
+                    bpk = parse_bits_per_key(text, n)
+                    if bpk is not None:
+                        bpk_val = f"{bpk:.2f}"
 
                 row += f" & {constr_val} & {query_val} & {bpk_val}"
 
@@ -2174,7 +2207,6 @@ def _table_java(tbl, args):
             overheads = []
             for bits in bits_order:
                 bench_err = rdir / f"bench.{n}.{bits}.err"
-                size_file = rdir / f"bench.{n}.{bits}.size"
 
                 qval = ""
                 if bench_err.exists():
@@ -2183,10 +2215,9 @@ def _table_java(tbl, args):
                     v = qd.get("query_min")
                     if v is not None:
                         qval = f"{v:.1f}"
-
-                if size_file.exists():
-                    file_bytes = int(size_file.read_text().strip())
-                    overheads.append(compute_overhead(file_bytes, n, bits))
+                    bpk = parse_bits_per_key(text, n)
+                    if bpk is not None:
+                        overheads.append(compute_overhead(bpk, bits))
 
                 query_cells += f" & {qval}"
 
@@ -2237,7 +2268,6 @@ def _table_java_comp(tbl, args):
                 tool_for_parse = _parse_tool(cfg["tool"])
 
                 bench_err = rdir / f"bench.{n}.0.err"
-                size_file = rdir / f"bench.{n}.0.size"
                 query_val = ""
                 bpk_val = ""
                 ovhd_val = ""
@@ -2248,15 +2278,13 @@ def _table_java_comp(tbl, args):
                     v = qd.get("query_min")
                     if v is not None:
                         query_val = f"{v:.1f}"
-
-                if size_file.exists():
-                    file_bytes = int(size_file.read_text().strip())
-                    bpk_val = f"{file_bytes * 8.0 / n:.2f}"
-                    dist = cfg.get("distribution")
-                    entropy = distribution_entropy(dist)
-                    if entropy is not None:
-                        ovhd = compute_overhead(file_bytes, n, entropy)
-                        ovhd_val = f"{ovhd:.1f}"
+                    bpk = parse_bits_per_key(text, n)
+                    if bpk is not None:
+                        bpk_val = f"{bpk:.2f}"
+                        dist = cfg.get("distribution")
+                        entropy = distribution_entropy(dist)
+                        if entropy is not None:
+                            ovhd_val = f"{compute_overhead(bpk, entropy):.1f}"
 
                 row += f" & {query_val} & {bpk_val} & {ovhd_val}"
 

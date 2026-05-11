@@ -96,13 +96,42 @@ def parse_burr_size(text):
 
     Matches:
         "Ribbon size: 12345 Bytes = …"  (standard BuRR)
-        "Size: 12345 Bytes = …"         (BuRR-VL / bench_csf)
+        "Size: 12345 Bytes = …"         (BuRR-VL / bench_csf, LeMonHash)
 
     Returns:
         int (bytes) or None.
     """
     m = re.search(r'(?:Ribbon )?[Ss]ize:\s*(\d+)\s*Bytes', text)
     return int(m.group(1)) if m else None
+
+
+def parse_bits_per_key(text, n=None):
+    """Extract the self-reported in-memory bits/key from build output.
+
+    Every builder logs the in-memory occupancy of the structure it just
+    built.  Recognized formats:
+
+        "Bits/key: 8.001 ..."            (sux-rs, Sux4J BenchBuilder, bench_phast)
+        "= 12.345 bits/key"              (bench_csf, bench_lemonhash[_str])
+        "Ribbon size: 12345 Bytes ..."   (BuRR) — combined with ``n`` below.
+
+    The BuRR line gives only a byte count, so we compute bits/key from
+    the byte count and ``n`` when supplied.
+
+    Returns:
+        float (bits/key) or None.
+    """
+    m = re.search(r'Bits/key:\s*([\d.]+)', text)
+    if m:
+        return float(m.group(1))
+    m = re.search(r'=\s*([\d.]+)\s*bits/key', text)
+    if m:
+        return float(m.group(1))
+    if n is not None and n > 0:
+        bytes_ = parse_burr_size(text)
+        if bytes_ is not None:
+            return bytes_ * 8.0 / n
+    return None
 
 
 def distribution_entropy(distribution):
@@ -133,21 +162,20 @@ def distribution_entropy(distribution):
     return None
 
 
-def compute_overhead(file_bytes, n, bits_per_key):
+def compute_overhead(actual_bpk, ideal_bpk):
     """Compute space overhead as a percentage above the optimum.
 
-    For filters, the optimum is n * bits (the bit width).
-    For compressed functions, the optimum is n * entropy.
+    For filters, the optimum is the bit width.
+    For compressed functions, the optimum is the value distribution's
+    entropy.
 
     Args:
-        file_bytes: actual structure size in bytes.
-        n: number of keys.
-        bits_per_key: optimum bits per key (bit width or entropy).
+        actual_bpk: self-reported bits/key of the built structure.
+        ideal_bpk:  optimum bits/key (bit width or entropy).
 
     Returns:
         float: percentage overhead (0% = exactly optimal).
     """
-    ideal_bits = n * bits_per_key
-    if ideal_bits == 0:
+    if ideal_bpk <= 0:
         return 0.0
-    return (file_bytes * 8.0 / ideal_bits) * 100.0 - 100.0
+    return (actual_bpk / ideal_bpk) * 100.0 - 100.0

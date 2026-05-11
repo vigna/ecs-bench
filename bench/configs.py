@@ -155,7 +155,7 @@ METHODS = {
         "burr_binary": "bench",
         "burr_flags": ["-L", "64", "-2", "-I"],
         "burr_threads": DEFAULT_THREADS,
-        "max_log2": 32,
+        "max_log2": 33,
     },
     "BuRR-seq": {
         "tool": "burr",
@@ -164,7 +164,7 @@ METHODS = {
         "burr_flags": ["-L", "64", "-2", "-I"],
         "burr_threads": 1,
         "no_queries": True,
-        "max_log2": 32,
+        "max_log2": 33,
     },
     # -----------------------------------------------------------------
     # CSF (Compressed Static Functions via BuRR-VL)
@@ -180,7 +180,7 @@ METHODS = {
         "label": "CSF(geo)",
         "distribution": ["--geometric"],
         "coder": "huffman",
-        "max_log2": 28,
+        "max_log2": 30,
         "query_keys": 20_000_000,
     },
     "CSF-Zipf": {
@@ -188,7 +188,7 @@ METHODS = {
         "label": "CSF(zipf)",
         "distribution": ["--zipf", "2000"],
         "coder": "huffman",
-        "max_log2": 28,
+        "max_log2": 30,
         "query_keys": 20_000_000,
     },
     "CSF-Uni256": {
@@ -196,7 +196,7 @@ METHODS = {
         "label": "CSF(uni256)",
         "distribution": ["--uniform", "256"],
         "coder": "huffman",
-        "max_log2": 28,
+        "max_log2": 30,
         "query_keys": 20_000_000,
     },
     # -----------------------------------------------------------------
@@ -215,7 +215,7 @@ METHODS = {
         "distribution": ["--geometric"],
         "shard_edge": "fuse3-shards",
         "build_threads": 1,
-        "max_log2": 28,
+        "max_log2": 30,
     },
     "CompVFunc-Zipf": {
         "tool": "comp-vfunc",
@@ -223,7 +223,7 @@ METHODS = {
         "distribution": ["--zipf", "2000"],
         "shard_edge": "fuse3-shards",
         "build_threads": 1,
-        "max_log2": 28,
+        "max_log2": 30,
     },
     "CompVFunc-Uni256": {
         "tool": "comp-vfunc",
@@ -231,7 +231,7 @@ METHODS = {
         "distribution": ["--uniform", "256"],
         "shard_edge": "fuse3-shards",
         "build_threads": 1,
-        "max_log2": 28,
+        "max_log2": 30,
     },
     # -----------------------------------------------------------------
     # sux-rs VFunc (list index functions / minimal perfect hash)
@@ -252,6 +252,10 @@ METHODS = {
         "bits_agnostic": True,
         "build_threads": DEFAULT_THREADS,
         "max_log2": 32,
+        # Compared against PHast+, whose build+query run in one process
+        # and therefore cannot be pinned.  Run VFunc queries unpinned
+        # too so the comparison is apples-to-apples.
+        "pin_query": False,
     },
     # -----------------------------------------------------------------
     # PHast+ (minimal perfect hash + array)
