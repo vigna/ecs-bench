@@ -101,7 +101,7 @@ METHODS = {
     },
     "FuseLge3Shards": {
         "tool": "sux",
-        "label": "VFilter(Fuse+LGE,par)",
+        "label": "VFilter(Fuse+LGE)",
         # Fuse + lazy Gaussian elimination + ε-cost sharding.
         # The paper's main contribution.
         "shard_edge": "fuse-lge3-shards",
@@ -124,7 +124,7 @@ METHODS = {
     },
     "Mwhc3": {
         "tool": "sux",
-        "label": "VFilter(MWHC,par)",
+        "label": "VFilter(MWHC)",
         # Classic MWHC 3-hypergraphs with ε-cost sharding.
         "shard_edge": "mwhc3",
         "build_bin": "vfilter",
@@ -151,7 +151,7 @@ METHODS = {
     # Query:  bench<bits> -t 1         -L 64 -2 -I -n <n> -r <file>
     "BuRR": {
         "tool": "burr",
-        "label": "BuRR (par)",
+        "label": "BuRR",
         "burr_binary": "bench",
         "burr_flags": ["-L", "64", "-2", "-I"],
         "burr_threads": DEFAULT_THREADS,
@@ -181,6 +181,7 @@ METHODS = {
         "distribution": ["--geometric"],
         "coder": "huffman",
         "max_log2": 28,
+        "query_keys": 20_000_000,
     },
     "CSF-Zipf": {
         "tool": "csf",
@@ -188,6 +189,7 @@ METHODS = {
         "distribution": ["--zipf", "2000"],
         "coder": "huffman",
         "max_log2": 28,
+        "query_keys": 20_000_000,
     },
     "CSF-Uni256": {
         "tool": "csf",
@@ -195,6 +197,7 @@ METHODS = {
         "distribution": ["--uniform", "256"],
         "coder": "huffman",
         "max_log2": 28,
+        "query_keys": 20_000_000,
     },
     # -----------------------------------------------------------------
     # sux-rs CompVFunc (compressed static functions)
@@ -325,6 +328,7 @@ METHODS = {
     "LeMonHashStr": {
         "tool": "lemonhash-str",
         "label": "LeMonHash(str)",
+        "query_keys": 20_000_000,
     },
     # -----------------------------------------------------------------
     # Sux4J GOV3 methods (Java build + C query)
@@ -386,9 +390,9 @@ FIGURES = {
             "Fuse3NoShards64",
             "Fuse3NoShards128",
             "FuseLge3Shards",
-            "FuseLge3Shards-seq",
             "Mwhc3",
             "BuRR",
+            "FuseLge3Shards-seq",
             "BuRR-seq",
         ],
         "column": "constr_ns",
@@ -439,14 +443,14 @@ FIGURES = {
         "ylabel": "ns/key",
     },
     # --- PHast+ comparison: no bit width suffix ---
-    # Bits-agnostic: pthash-build.pdf, pthash-query.pdf.
-    "pthash-build": {
+    # Bits-agnostic: phast-build.pdf, phast-query.pdf.
+    "phast-build": {
         "title": "PHast+ vs VFunc Construction",
         "methods": ["Phast", "VFunc"],
         "column": "constr_ns",
         "ylabel": "ns/key",
     },
-    "pthash-query": {
+    "phast-query": {
         "title": "PHast+ vs VFunc Queries",
         "methods": ["Phast", "VFunc"],
         "column": "query_min",

@@ -423,7 +423,7 @@ def sux_build_cmd(cfg, n, bits, outfile, args):
     cmd += ["--shard-edge", cfg["shard_edge"]]
     if bits > 0:
         cmd += ["--bits", str(bits)]
-        if bits not in EVEN_BITS:
+        if args.unaligned and bits not in EVEN_BITS:
             cmd += ["--unaligned"]
 
     # Per-method extras: --eps, --seed, etc.
@@ -461,7 +461,7 @@ def sux_query_cmd(cfg, n, bits, infile, args):
     cmd += ["--edge", cfg["shard_edge"]]
     if bits > 0:
         cmd += ["--bits", str(bits)]
-    if bits > 0 and bits not in EVEN_BITS:
+    if bits > 0 and args.unaligned and bits not in EVEN_BITS:
         cmd += ["--unaligned"]
     return cmd
 
@@ -934,7 +934,8 @@ def _bench_mmphf(cfg, method_name, n, log2_n, rdir, args):
     # --- Build (pinned — single-threaded, so pinning is fine) ---
     cmd = [str(target / "release" / "lcp_mmphf")]
     cmd += ["-n", str(n)]
-    cmd += ["--unaligned"]
+    if args.unaligned:
+        cmd += ["--unaligned"]
     cmd += ["--threads", "1"]
     if cfg.get("variant") == "lcp2":
         cmd += ["-2"]
@@ -947,7 +948,8 @@ def _bench_mmphf(cfg, method_name, n, log2_n, rdir, args):
     qkeys = cfg.get("query_keys", QUERY_KEYS)
     qcmd = [str(target / "release" / "examples" / "bench_lcp_mmphf")]
     qcmd += [str(qkeys), str(outfile)]
-    qcmd += ["--unaligned"]
+    if args.unaligned:
+        qcmd += ["--unaligned"]
     if cfg.get("variant") == "lcp2":
         qcmd += ["-2"]
     qcmd += ["--repeats", "5"]
@@ -1024,7 +1026,8 @@ def _bench_mmphf_str(cfg, method_name, dataset, rdir, args):
     # --- Build (unpinned) ---
     cmd = [str(target / "release" / "lcp_mmphf")]
     cmd += ["-f", datafile]
-    cmd += ["--unaligned"]
+    if args.unaligned:
+        cmd += ["--unaligned"]
     cmd += ["--threads", "1"]
     if cfg.get("variant") == "lcp2":
         cmd += ["-2"]
@@ -1038,7 +1041,8 @@ def _bench_mmphf_str(cfg, method_name, dataset, rdir, args):
     qcmd = [str(target / "release" / "examples" / "bench_lcp_mmphf")]
     qcmd += [str(qkeys), str(outfile)]
     qcmd += ["-f", datafile]
-    qcmd += ["--unaligned"]
+    if args.unaligned:
+        qcmd += ["--unaligned"]
     if cfg.get("variant") == "lcp2":
         qcmd += ["-2"]
     qcmd += ["--repeats", "5"]
@@ -1798,9 +1802,9 @@ TABLES = {
     },
     "mmphf-str": {
         "methods": [
-            ("LcpMmphfStr", "LcpMmphf"),
-            ("Lcp2MmphfStr", "Lcp2Mmphf"),
-            ("LeMonHashStr", "LeMonHash"),
+            ("LcpMmphfStr", "Lcp"),
+            ("Lcp2MmphfStr", "Lcp2"),
+            ("LeMonHashStr", "LeMon"),
         ],
     },
     "comp": {
@@ -1993,7 +1997,17 @@ def _table_mmphf_str(tbl, args):
             m = re.match(r'bench\.(.+)\.0\.err$', f.name)
             if m:
                 datasets.add(m.group(1))
-    datasets = sorted(datasets)
+    # Sort datasets by number of keys (ascending) so columns go
+    # from smallest to largest.
+    def _dataset_n(d):
+        for method_name, _ in tbl["methods"]:
+            p = Path(args.results_dir) / method_name / f"bench.{d}.0.err"
+            if p.exists():
+                n = _parse_n_from_build(p.read_text())
+                if n:
+                    return n
+        return 0
+    datasets = sorted(datasets, key=_dataset_n)
     if not datasets:
         print("No string dataset results found.")
         return
@@ -2011,7 +2025,7 @@ def _table_mmphf_str(tbl, args):
         hdr1 += f" & \\multicolumn{{{cols_per_dataset}}}{{c}}{{\\texttt{{{safe}}}}}"
     print(hdr1 + r" \\")
 
-    sub_hdr = " & Constr. & Bits/key & Query" * ndatasets
+    sub_hdr = " & Constr. & b/key & Query" * ndatasets
     print(sub_hdr + r" \\")
     print(r"\midrule")
 
@@ -2039,10 +2053,10 @@ def _table_mmphf_str(tbl, args):
                 n = _parse_n_from_build(text)
                 v = bd.get("constr_ns")
                 if v is not None:
-                    constr_val = f"{v:.1f}"
+                    constr_val = f"{v:.0f}"
                 v = qd.get("query_min")
                 if v is not None:
-                    query_val = f"{v:.1f}"
+                    query_val = f"{v:.0f}"
 
             if size_file.exists() and n:
                 file_bytes = int(size_file.read_text().strip())
@@ -2315,6 +2329,8 @@ def make_parser():
         sp.add_argument("--max-log2", type=int, default=33,
                         help=f"Maximum log2(n) (default: 33, min: {MIN_LOG2})")
         # Allow global flags after the subcommand too.
+        sp.add_argument("--unaligned", action="store_true", default=False,
+                        help="Use unaligned storage (BitFieldVec) instead of aligned primitives")
         sp.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
         sp.add_argument("--force", action="store_true", default=argparse.SUPPRESS)
         sp.add_argument("--pin", default=argparse.SUPPRESS)
