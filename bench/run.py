@@ -20,7 +20,8 @@ Usage examples:
     # Report to stdout
     python bench/run.py report --method FuseLge3Shards --bits 8
 
-    # Parallel query benchmark (96 instances via GNU parallel)
+    # Parallel query benchmark (N instances via GNU parallel; defaults
+    # to cpu_count()//2, override with --jobs)
     python bench/run.py par-bench --method FuseLge3Shards --bits 8 \\
         --max-log2 30 --jobs 96
 
@@ -190,18 +191,32 @@ def size_check(outfile, n, text):
             f"(expected ~{expected:.0f} B)\n")
 
 
-def par_query_limit(bits):
-    """Maximum n for which parallel queries are feasible.
+# Fraction of physical RAM the par-query benchmark is allowed to use.
+# Leaves headroom for the kernel page cache (keys file), GNU parallel,
+# and per-process scratch outside the mmap'd structure.
+PAR_QUERY_MEM_FRACTION = 0.90
 
-    With 96 instances each mapping the structure, the total memory is
-    roughly 96 × file_size, and the file is bit-packed at exactly
-    ``bits`` bits/key (Box<[u8/u16/u32]> for power-of-2 widths,
-    BitFieldVec<Box<[u64]>> otherwise).  Cap aggregate memory at ~96 GB
-    by requiring n × bits ≤ 2^33 bits, i.e. n ≤ 2^33 / bits.
+
+def _total_ram_bytes():
+    """Total physical RAM in bytes, via sysconf (Linux + macOS)."""
+    return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+
+
+def par_query_limit(bits, jobs):
+    """Maximum n for which the par-query benchmark fits in RAM.
+
+    ``jobs`` mmap'd copies of the same bit-packed file each cost
+    ``n * bits / 8`` bytes of resident memory under load (the OS does
+    not share dirtied/faulted pages across processes in practice).
+    Cap the aggregate at PAR_QUERY_MEM_FRACTION of physical RAM:
+
+        jobs * n * bits / 8  ≤  fraction * total_ram
+        ⇒  n ≤ 8 * fraction * total_ram / (jobs * bits)
     """
-    if bits <= 0:
+    if bits <= 0 or jobs <= 0:
         return 0
-    return (1 << 33) // bits
+    budget_bytes = int(PAR_QUERY_MEM_FRACTION * _total_ram_bytes())
+    return (8 * budget_bytes) // (jobs * bits)
 
 
 # =====================================================================
@@ -1326,7 +1341,7 @@ def cmd_par_bench(args):
         max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
 
         for bits in bits_list:
-            max_n = par_query_limit(bits)
+            max_n = par_query_limit(bits, args.jobs)
             for log2_n in range(MIN_LOG2, max_log2 + 1):
                 n = 1 << log2_n
                 if n > max_n:
