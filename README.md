@@ -3,24 +3,27 @@
 This is the companion repository for the paper
 
 > Sebastiano Vigna.
-> _ε-Cost Sharding: Scaling Hypergraph-Based Static Functions and Filters to Trillions of Keys._
-> arXiv:2503.18397, 2025. <https://arxiv.org/abs/2503.18397>
+> [_ε-Cost Sharding: Scaling Hypergraph-Based Static Functions and Filters to Trillions of Keys_](https://arxiv.org/abs/2503.18397), 2025.
 
 The paper introduces a partitioning scheme that lets MWHC and fuse-graph
 constructions of static functions and filters scale to trillions of keys with
-only a small (hence, ε), controllable relative space overhead. This repository
-contains the Python framework that drives all benchmarks, the figure/table
-generators, and pinned submodules of every competing implementation we compare
-against. The actual implementations live in the
-[`sux`](https://github.com/vigna/sux-rs) Rust crate.
+only a small (hence, ε), controllable relative space overhead. The technique is
+then extended to monotone minimal perfect hash functions based on prefixes, and
+to compressed static functions.
+
+This repository contains the Python framework
+that drives all benchmarks, the figure/table generators, and pinned submodules
+of every competing implementation we compare against. The actual implementations
+live in the [`sux`](https://github.com/vigna/sux-rs) Rust crate.
 
 ## Contents
 
 - `bench/`: Python framework. `run.py` is the single entry point; `configs.py`
   defines the method matrix; `parse.py` extracts numbers from build/query
   output.
-- `Sux4J/`, `BuRR/`, `BuRR-VL/`, `LearnedStaticFunction/`, `MMPHF-Experiments/`,
-  `sux-rs/`: pinned submodules of competing implementations.
+- `Sux4J/`, `BuRR/`, `BuRR-VL/`, `LearnedStaticFunction/`, `MMPHF-Experiments/`:
+  pinned submodules of competing implementations.
+- `sux-rs/`: pinned submodule of `sux`.
 - `java/`: Maven project for the Sux4J GOV3 build path.
 - `Makefile`: builds the C++ benches (BuRR, `bench_csf`, `bench_lemonhash`,
   `bench_lemonhash_str`). Its `init` target pulls submodules and applies the
@@ -29,28 +32,19 @@ against. The actual implementations live in the
 
 ## Dependencies
 
-The build was developed and tested on Rocky Linux 9. The package set installed
-by the campaign machines (Rocky/RHEL family; translate to apt/zypper for other
-distributions) is:
-
-```sh
-sudo dnf -y install g++ boost-devel tbb-devel xxhash-devel git cmake \
-                    ninja-build clang-devel parallel pip java-latest-openjdk maven
-sudo pip install matplotlib
-```
-
-These split into:
+The build was developed and tested on several different Linux distributions. The
+dependencies are:
 
 - `g++`, `boost-devel`, `tbb-devel`, `xxhash-devel`, `clang-devel`: C++
   toolchain plus headers needed by the BuRR / BuRR-VL / sdsl-lite build paths.
 - `cmake`, `ninja-build`, `make`, `git`, `parallel` (GNU parallel; needed by
   `par-bench`).
 - A JDK and Maven, for the Sux4J GOV3 build path.
-- Python 3.9+ (`pip`) and `matplotlib` (the latter only needed for `plot`).
+- Python 3.9+, with `pip install matplotlib` (only needed for `plot`).
+- `zstd`, to decompress the string data.
 
-The C++ benches require a **C++20 toolchain with `-fno-strict-aliasing`
-support** (the option is required for GCC 15+ not to miscompile BuRR under `-O3`,
-but it can be removed for other compilers).
+The C++ benches require a C++20 toolchain; we use `-fno-strict-aliasing`
+to keep GCC 15+ from miscompiling BuRR under `-O3`.
 
 Rust (stable) must be installed. `make init` then pulls submodules and
 applies the LeMonHashVL string-view fairness patches (they are necessary to
@@ -61,17 +55,29 @@ the strings).
 
 The integer benchmarks generate keys deterministically and need no external
 data. The string benchmarks (`LcpMmphfStr`, `LeMonHashStr`) read sorted-string
-files from `data/`. Pre-built sorted datasets used in the paper can be recovered
-with
+files from `data/`. Pre-built sorted datasets used in the paper can be
+downloaded with
 
-> curl https://vigna.di.unimi.it/data.tar.zst | zstd -d | tar xv
+```sh
+curl https://vigna.di.unimi.it/data.tar.zst | zstd -d | tar xv
+```
 
 The framework picks them up automatically (one structure built and timed per
-file, so you can delete files that are too big for your hardware, or add your own.
+file, so you can delete files that are too big for your hardware, or add your
+own).
 
-## The `run.py` workflow
+## The workflow
 
-`bench/run.py` is the single entry point. Subcommands:
+First, clone the repository and prepare data:
+
+```sh
+git clone https://github.com/vigna/ecs-bench.git
+cd ecs-bench
+make init
+curl https://vigna.di.unimi.it/data.tar.zst | zstd -d | tar xv
+```
+
+Benchmarks are run by `bench/run.py`, which has several subcommands:
 
 - `bench` — build each (method, n, bits) triple, run queries, write a result
   file under `results/<method>/` (by default).
@@ -92,8 +98,7 @@ points that aren't already complete. Pass `--force` to override.
 All binaries are built on demand by `run.py`: the sux-rs binaries (compiled
 with `cargo build --profile bench`), the Java `BenchBuilder` (via Maven), and
 the C++ benches (BuRR, `bench_csf`, `bench_lemonhash`, `bench_lemonhash_str`,
-and the Sux4J/C harness; each via `make`). After `make init` no further manual
-build step is required.
+and the Sux4J/C harness).
 
 ## Recommended first-time workflow
 
@@ -116,7 +121,7 @@ never recomputes a data point that already has a result file, so it is safe
    ```
 
 3. **Extend gradually.** Each successive call only executes the (method, n,
-   bits) triples whose result files don't already exist. Typical progression:
+   bits) triples whose result files don't already exist.
 
    ```sh
    python bench/run.py bench --max-log2 25
@@ -125,25 +130,25 @@ never recomputes a data point that already has a result file, so it is safe
 4. For the parallel-query column of the paper:
 
    ```sh
-   python bench/run.py par-bench --method all --bits 8 --max-log2 30 --jobs 96
+   python bench/run.py par-bench --max-log2 30 --jobs 96
    ```
 
-   `--jobs` defaults to `cpu_count()//2` if omitted.
+   `--jobs` defaults to `cpu_count()//2` if omitted. `par-bench` will
+   also automatically limit the maximum size based on the physical RAM.
 
 5. Render the figures and tables once the matrix is populated:
 
    ```sh
-   python bench/run.py plot  --figure all --bits even
+   python bench/run.py plot --figure all
    python bench/run.py table --table java
    ```
 
 ### CPU pinning
 
-For a clean campaign, pin single-threaded phases to an isolated core:
+For more stable measurements, pin single-threaded phases to an isolated core:
 
 ```sh
-python bench/run.py bench --method all --bits all \
-    --pin "chrt -f 99 taskset -c 2"
+python bench/run.py bench --pin "taskset -c 2"
 ```
 
 The `--pin` prefix is applied to query commands and to single-threaded
