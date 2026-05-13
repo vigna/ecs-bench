@@ -43,13 +43,14 @@ dependencies are:
 - Python 3.9+, with `pip install matplotlib` (only needed for `plot`).
 - `zstd`, to decompress the string data.
 
-The C++ benches require a C++20 toolchain; we use `-fno-strict-aliasing`
-to keep GCC 15+ from miscompiling BuRR under `-O3`.
+The C++ benches require a C++20 toolchain; we use `-fno-strict-aliasing` to
+[keep GCC 15+ from miscompiling BuRR under
+`-O3`](https://github.com/lorenzhs/BuRR/issues/4).
 
-Rust (stable) must be installed. `make init` then pulls submodules and
-applies the LeMonHashVL string-view fairness patches (they are necessary to
-speed up the LeMonHashVL benchmark by avoiding cache misses when retrieving
-the strings).
+Rust (stable) must be installed. `make init` then pulls submodules and applies
+the LeMonHashVL string-view fairness patches (they are necessary to speed up the
+LeMonHashVL benchmark by avoiding cache misses or copies when accessing the
+strings).
 
 ## Datasets
 
@@ -66,15 +67,15 @@ The framework picks them up automatically (one structure built and timed per
 file, so you can delete files that are too big for your hardware, or add your
 own).
 
-## The workflow
+## Installation
 
-First, clone the repository and prepare data:
+First, clone the repository and prepare the data:
 
 ```sh
 git clone https://github.com/vigna/ecs-bench.git
 cd ecs-bench
-make init
 curl https://vigna.di.unimi.it/data.tar.zst | zstd -d | tar xv
+make init
 ```
 
 Benchmarks are run by `bench/run.py`, which has several subcommands:
@@ -113,15 +114,15 @@ never recomputes a data point that already has a result file, so it is safe
    python bench/run.py bench --dry-run
    ```
 
-2. **A small smoke run** at one bit width and small sizes, to confirm that
-   every binary compiles, runs, and produces parseable output:
+2. **A small smoke run** at small sizes, to confirm that every binary compiles,
+   runs, and produces parseable output:
 
    ```sh
    python bench/run.py bench --max-log2 22
    ```
 
-3. **Extend gradually.** Each successive call only executes the (method, n,
-   bits) triples whose result files don't already exist.
+3. **Extend gradually.** Each successive call only executes benchmarks whose
+   result files don't already exist.
 
    ```sh
    python bench/run.py bench --max-log2 25
@@ -143,6 +144,10 @@ never recomputes a data point that already has a result file, so it is safe
    python bench/run.py table --table java
    ```
 
+Explore the help of `run.py` for more fine-grained control, e.g. to run only a
+subset of methods or sizes, or to keep the transient serialized data (which is
+deleted by default to save space).
+
 ### CPU pinning
 
 For more stable measurements, pin single-threaded phases to an isolated core:
@@ -155,7 +160,7 @@ The `--pin` prefix is applied to query commands and to single-threaded
 builders; multi-threaded builds run unpinned so that parallel construction is
 not artificially serialised.
 
-## Result layout
+## Results layout
 
 ```
 results/
