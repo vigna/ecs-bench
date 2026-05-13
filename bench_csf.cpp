@@ -142,6 +142,7 @@ using FanoCoding = lsf::BitWiseFilterCoding<lsf::FilterFanoCoder>;
 using HuffmanCoding = lsf::BitWiseFilterCoding<lsf::FilterHuffmanCoderCSF>;
 
 bool no_queries = false;
+size_t num_queries = 100000000;
 
 template <typename Coding>
 void run_bench(size_t n, const uint64_t *keys, const uint32_t *values,
@@ -194,7 +195,7 @@ void run_bench(size_t n, const uint64_t *keys, const uint32_t *values,
   if (no_queries)
     return;
 
-  const uint64_t N = 100000000;
+  const uint64_t N = num_queries;
   const int REPEATS = 5;
 
   std::vector<double> timings;
@@ -234,6 +235,8 @@ int main(int argc, char **argv) {
   cmd.add_string('c', "coder", coder_name,
                  "coder: fano or huffman (default: fano)");
   cmd.add_bool('Q', "noqueries", no_queries, "don't run any queries");
+  cmd.add_size_t("queries", num_queries,
+                 "number of queries per repeat (default 100000000)");
   cmd.add_string('r', "read", ifile, "file to read serialized data");
   cmd.add_string('w', "write", ofile, "file to write serialized data");
 

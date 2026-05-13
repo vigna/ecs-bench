@@ -1,0 +1,23 @@
+diff --git a/include/MurmurHash64.h b/include/MurmurHash64.h
+index 4ea78fd..0285b98 100644
+--- a/include/MurmurHash64.h
++++ b/include/MurmurHash64.h
+@@ -3,6 +3,7 @@
+ #include <cstdint>
+ #include <cstddef>
+ #include <string>
++#include <string_view>
+ 
+ namespace util {
+ static inline uint64_t MurmurHash64(const void * key, int len) {
+@@ -56,6 +57,10 @@ static inline uint64_t MurmurHash64(const std::string &key) {
+     return MurmurHash64(key.data(), key.size());
+ }
+ 
++static inline uint64_t MurmurHash64(std::string_view key) {
++    return MurmurHash64(key.data(), key.size());
++}
++
+ static inline uint64_t MurmurHash64Seeded(uint64_t key, uint64_t seed) {
+     return MurmurHash64(MurmurHash64(key) ^ seed);
+ }

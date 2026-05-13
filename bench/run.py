@@ -26,7 +26,7 @@ Usage examples:
         --max-log2 30 --jobs 96
 
     # Generate paper figures
-    python bench/run.py plot --figure construction --bits even
+    python bench/run.py plot --figure filter-build --bits even
 
     # Show what has been completed
     python bench/run.py status
@@ -496,7 +496,7 @@ def sux_query_cmd(cfg, n, bits, infile, args):
     """
     target = sux_target_dir(args.sux_dir)
     cmd = [str(target / "release" / "examples" / cfg["bench_bin"])]
-    cmd += [str(QUERY_KEYS)]             # number of query operations
+    cmd += [str(cfg.get("query_keys", QUERY_KEYS))]
     cmd += [str(infile)]                 # serialized structure
     cmd += ["--edge", cfg["shard_edge"]]
     if bits > 0:
@@ -584,7 +584,7 @@ def comp_vfunc_query_cmd(cfg, n, infile, args):
     """
     target = sux_target_dir(args.sux_dir)
     cmd = [str(target / "release" / "examples" / "bench_comp_vfunc")]
-    cmd += [str(QUERY_KEYS)]
+    cmd += [str(cfg.get("query_keys", QUERY_KEYS))]
     cmd += [str(infile)]
     cmd += ["--edge", cfg["shard_edge"]]
     return cmd
@@ -608,11 +608,12 @@ def csf_query_cmd(cfg, n, infile):
     """Assemble the bench_csf query command (deserialize, run queries).
 
     Example:
-        bench_csf -n 1048576 --coder huffman -r input.bin
+        bench_csf -n 1048576 --coder huffman --queries 20000000 -r input.bin
     """
     cmd = [str(Path(REPO_ROOT) / "bench_csf")]
     cmd += ["-n", str(n)]
     cmd += ["--coder", cfg["coder"]]
+    cmd += ["--queries", str(cfg.get("query_keys", QUERY_KEYS))]
     cmd += ["-r", str(infile)]
     return cmd
 
@@ -942,7 +943,7 @@ def _bench_phast(cfg, method_name, n, log2_n, rdir, args):
     """
     target = sux_target_dir(args.sux_dir)
     cmd = [str(target / "release" / "examples" / "bench_phast")]
-    cmd += [str(n), str(QUERY_KEYS)]
+    cmd += [str(n), str(cfg.get("query_keys", QUERY_KEYS))]
 
     threads = cfg.get("build_threads")
     if args.threads is not None:
@@ -1065,7 +1066,7 @@ def _bench_mmphf_str(cfg, method_name, dataset, rdir, args):
     outfile = ddir / f"func.{dataset}.bin"
     datafile = str(Path(DATA_DIR) / dataset)
 
-    # --- Build (unpinned) ---
+    # --- Build (pinned — single-threaded, matches LeMonHashStr build) ---
     cmd = [str(target / "release" / "lcp_mmphf")]
     cmd += ["-f", datafile]
     if args.unaligned:
@@ -1076,7 +1077,7 @@ def _bench_mmphf_str(cfg, method_name, dataset, rdir, args):
     cmd += [str(outfile)]
 
     print(f"  bench {method_name} dataset={dataset}")
-    result = run_cmd(cmd, dry_run=args.dry_run)
+    result = run_cmd(cmd, pin=args.pin, dry_run=args.dry_run)
 
     # --- Query (pinned, only if build succeeded) ---
     qkeys = cfg.get("query_keys", QUERY_KEYS)

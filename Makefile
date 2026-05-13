@@ -34,6 +34,12 @@ init:
 	git submodule update --init MMPHF-Experiments
 	cd MMPHF-Experiments && git -c url.https://github.com/.insteadOf=git@github.com: submodule update --init cpp/extlib/LeMonHash
 	cd MMPHF-Experiments/cpp/extlib/LeMonHash && git submodule update --init --recursive
+	# Fairness patch: switch LeMonHashVL public API to std::string_view so
+	# bench_lemonhash_str doesn't have to memcpy each query into a
+	# std::string inside the timed loop. --forward + || true makes
+	# re-running make init idempotent.
+	cd MMPHF-Experiments/cpp/extlib/LeMonHash && patch -p1 --forward < ../../../../lemonhash-vl-string-view.patch || true
+	cd MMPHF-Experiments/cpp/extlib/LeMonHash/extlib/util && patch -p1 --forward < ../../../../../../murmurhash-string-view.patch || true
 
 # BuRR-VL dependencies: sorter object and tlx library
 $(BURR_VL)/sorter.o: $(BURR_VL)/sorter.cpp $(BURR_VL)/sorter.hpp

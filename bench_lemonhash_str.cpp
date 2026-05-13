@@ -21,6 +21,7 @@
 #include <numeric>
 #include <random>
 #include <string>
+#include <string_view>
 #include <vector>
 
 static std::vector<std::string> load_sorted_strings(const char *path) {
@@ -142,19 +143,15 @@ int main(int argc, char **argv) {
   std::vector<double> timings;
   timings.reserve(repeats);
 
-  // LeMonHashVL::operator() takes const std::string&, so we need a
-  // std::string for each query.  We reuse a single instance: assign()
-  // avoids heap allocation when the new content fits in the existing
-  // capacity, reducing the per-query cost to a memcpy.
-  std::string tmp;
-  tmp.reserve(1024);
-
+  // LeMonHashVL::operator() takes std::string_view (after the upstream
+  // patch in MMPHF-Experiments/cpp/extlib/LeMonHash); we hand it a view
+  // straight into the packed buffer, with no per-query memcpy.
   for (int r = 0; r < repeats; r++) {
     uint64_t acc = 0;
     auto qstart = std::chrono::steady_clock::now();
     for (size_t i = 0; i < query_keys; i++) {
-      tmp.assign(&packed[offsets[i]], offsets[i + 1] - offsets[i]);
-      acc ^= mmphf(tmp);
+      std::string_view sv(&packed[offsets[i]], offsets[i + 1] - offsets[i]);
+      acc ^= mmphf(sv);
     }
     const volatile uint64_t _sink = acc;
     auto qend = std::chrono::steady_clock::now();
