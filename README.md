@@ -42,6 +42,7 @@ dependencies are:
 - A JDK and Maven, for the Sux4J GOV3 build path.
 - Python 3.9+, with `pip install matplotlib` (only needed for `plot`).
 - `zstd`, to decompress the string data.
+- `patch`, to apply the fairness patches to LeMonHash.
 
 The C++ benches require a C++20 toolchain; we use `-fno-strict-aliasing` to
 [keep GCC 15+ from miscompiling BuRR under
