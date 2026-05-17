@@ -103,6 +103,15 @@ def _parse_tool(tool):
     return _PARSE_TOOL_MAP.get(tool, tool)
 
 
+def effective_max_log2(args, cfg):
+    """Cap on log2(n) for a method: the config's max_log2, optionally
+    tightened by --max-log2 if the user passed it. No implicit fallback."""
+    cap = cfg["max_log2"]
+    if args.max_log2 is not None:
+        cap = min(cap, args.max_log2)
+    return cap
+
+
 def result_complete(path, tool, no_queries=False):
     """Check whether a result file exists and contains valid timing data.
 
@@ -776,7 +785,7 @@ def cmd_bench(args):
             print(f"Skipping {method_name} (Java/Sux4J not available)")
             continue
 
-        max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
+        max_log2 = effective_max_log2(args, cfg)
         bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in BITS_AGNOSTIC_TOOLS)
         method_bits = [0] if bits_agnostic else bits_list
 
@@ -1339,7 +1348,7 @@ def cmd_par_bench(args):
         if cfg.get("bits_agnostic"):
             continue
 
-        max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
+        max_log2 = effective_max_log2(args, cfg)
 
         for bits in bits_list:
             max_n = par_query_limit(bits, args.jobs)
@@ -1537,7 +1546,7 @@ def cmd_report(args):
             continue
 
         # Standard size-based methods.
-        max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
+        max_log2 = effective_max_log2(args, cfg)
         bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in BITS_AGNOSTIC_TOOLS)
         method_bits = [0] if bits_agnostic else bits_list
 
@@ -1657,7 +1666,7 @@ def _plot_one(figure_name, args, plt):
             rdir = Path(args.results_dir) / method_name
             if not rdir.exists():
                 continue
-            max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
+            max_log2 = effective_max_log2(args, cfg)
             tool_for_parse = _parse_tool(cfg["tool"])
             for log2_n in range(MIN_LOG2, max_log2 + 1):
                 n = 1 << log2_n
@@ -1687,7 +1696,7 @@ def _plot_one(figure_name, args, plt):
                 continue
 
             xs, ys = [], []
-            max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
+            max_log2 = effective_max_log2(args, cfg)
             tool_for_parse = _parse_tool(cfg["tool"])
 
             for log2_n in range(MIN_LOG2, max_log2 + 1):
@@ -1762,7 +1771,7 @@ def cmd_status(args):
             print(f"{method_name:24s}  bench {done}/{total}")
             continue
 
-        max_log2 = min(args.max_log2, cfg.get("max_log2", 33))
+        max_log2 = effective_max_log2(args, cfg)
 
         done_bench, done_pq = 0, 0
         total = 0
@@ -1848,7 +1857,7 @@ TABLES = {
             ("Lcp2MmphfInt", "Lcp2MmphfInt"),
             ("LeMonHashInt", "LeMonHashInt"),
         ],
-        "sizes": [1 << 20, 1 << 31],
+        "sizes": [1 << 20, 1 << 32],
     },
     "mmphf-str": {
         "methods": [
@@ -2370,8 +2379,9 @@ def make_parser():
                         help="Method name(s), comma-separated, or 'all'")
         sp.add_argument("--bits", default="all",
                         help="Bit widths: 'all', 'even', 'odd', or comma-separated ints")
-        sp.add_argument("--max-log2", type=int, default=33,
-                        help=f"Maximum log2(n) (default: 33, min: {MIN_LOG2})")
+        sp.add_argument("--max-log2", type=int, default=None,
+                        help=f"Tighten the per-method max_log2 cap (min: {MIN_LOG2}). "
+                             "If omitted, only the per-method cap in configs.py applies.")
         # Allow global flags after the subcommand too.
         sp.add_argument("--unaligned", action="store_true", default=False,
                         help="Use unaligned storage (BitFieldVec) instead of aligned primitives")
@@ -2404,7 +2414,9 @@ def make_parser():
                     help=f"Figure preset, or 'all' (default): {', '.join(FIGURES)}")
     pl.add_argument("--bits", default="all",
                     help="Bit widths for figures")
-    pl.add_argument("--max-log2", type=int, default=33)
+    pl.add_argument("--max-log2", type=int, default=None,
+                    help="Tighten the per-method max_log2 cap. "
+                         "If omitted, only the per-method cap in configs.py applies.")
     pl.add_argument("--output-dir", default="figs",
                     help="Output directory for PDFs (default: figs)")
 

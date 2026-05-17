@@ -290,19 +290,19 @@ METHODS = {
         "label": "LcpMmphf(int)",
         "variant": "lcp",
         "build_threads": 1,
-        "max_log2": 30,
+        "max_log2": 32,
     },
     "Lcp2MmphfInt": {
         "tool": "mmphf",
         "label": "Lcp2Mmphf(int)",
         "variant": "lcp2",
         "build_threads": 1,
-        "max_log2": 30,
+        "max_log2": 32,
     },
     "LeMonHashInt": {
         "tool": "lemonhash",
         "label": "LeMonHash(int)",
-        "max_log2": 30,
+        "max_log2": 32,
     },
     # -----------------------------------------------------------------
     # Monotone MMPHF methods (string keys from data/ directory)
