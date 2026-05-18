@@ -66,7 +66,7 @@ METHODS = {
     #
     # All sux-rs methods:
     #   build: vfilter -n <n> --shard-edge <E> --bits <b> [--unaligned] <outfile>
-    #   query: bench_vfilter <query_keys> <file> --edge <E> --bits <b> [--unaligned]
+    #   query: bench_vfilter <query_keys> <file> --shard-edge <E> --bits <b> [--unaligned]
     #
     # --unaligned is added only for odd (non-power-of-2) bit widths.
     # For even bit widths (8, 16, 32) the backend is a Box<[u8/u16/u32]>
@@ -208,7 +208,7 @@ METHODS = {
     # Uses bits=0 sentinel.
     #
     # Build:  comp_vfunc -n <n> --geometric --shard-edge fuse3-shards <outfile>
-    # Query:  bench_comp_vfunc <n> <outfile> --edge fuse3-shards
+    # Query:  bench_comp_vfunc <n> <outfile> --shard-edge fuse3-shards
     "CompVFunc-Geo": {
         "tool": "comp-vfunc",
         "label": "CompVFunc(geo)",
@@ -239,7 +239,7 @@ METHODS = {
     #
     # Same two-step pattern as VFilter:
     #   Build: vfunc -n <n> --shard-edge <E> [--threads T] <outfile>
-    #   Query: bench_vfunc <query_keys> <outfile> --edge <E>
+    #   Query: bench_vfunc <query_keys> <outfile> --shard-edge <E>
     #
     # VFunc maps keys to their rank [0..n), so bits/key is a result
     # metric (bits-agnostic).

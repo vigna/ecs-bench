@@ -500,14 +500,14 @@ def sux_query_cmd(cfg, n, bits, infile, args):
     """Assemble the bench_vfilter query command line.
 
     Example (odd bits):
-        bench_vfilter 100000000 output.bin --edge fuse-lge3-shards
+        bench_vfilter 100000000 output.bin --shard-edge fuse-lge3-shards
                       --bits 9 --unaligned
     """
     target = sux_target_dir(args.sux_dir)
     cmd = [str(target / "release" / "examples" / cfg["bench_bin"])]
     cmd += [str(cfg.get("query_keys", QUERY_KEYS))]
     cmd += [str(infile)]                 # serialized structure
-    cmd += ["--edge", cfg["shard_edge"]]
+    cmd += ["--shard-edge", cfg["shard_edge"]]
     if bits > 0:
         cmd += ["--bits", str(bits)]
     if bits > 0 and args.unaligned and bits not in EVEN_BITS:
@@ -589,13 +589,13 @@ def comp_vfunc_query_cmd(cfg, n, infile, args):
     """Assemble the bench_comp_vfunc query command line.
 
     Example:
-        bench_comp_vfunc 100000000 output.bin --edge fuse3-shards
+        bench_comp_vfunc 100000000 output.bin --shard-edge fuse3-shards
     """
     target = sux_target_dir(args.sux_dir)
     cmd = [str(target / "release" / "examples" / "bench_comp_vfunc")]
     cmd += [str(cfg.get("query_keys", QUERY_KEYS))]
     cmd += [str(infile)]
-    cmd += ["--edge", cfg["shard_edge"]]
+    cmd += ["--shard-edge", cfg["shard_edge"]]
     return cmd
 
 
