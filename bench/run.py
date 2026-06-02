@@ -105,8 +105,16 @@ def _parse_tool(tool):
 
 def effective_max_log2(args, cfg):
     """Cap on log2(n) for a method: the config's max_log2, optionally
-    tightened by --max-log2 if the user passed it. No implicit fallback."""
-    cap = cfg["max_log2"]
+    tightened by --max-log2 if the user passed it. No implicit fallback.
+
+    Methods that enumerate an explicit ``sizes`` list (e.g. the Sux4J/Java
+    methods) instead of a ``max_log2`` derive their cap from the largest
+    listed size; their size-iterating code paths use ``sizes`` directly, so
+    this value only matters where a range is needed."""
+    if "max_log2" in cfg:
+        cap = cfg["max_log2"]
+    else:
+        cap = max(cfg["sizes"]).bit_length() - 1
     if args.max_log2 is not None:
         cap = min(cap, args.max_log2)
     return cap
