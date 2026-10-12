@@ -17,7 +17,7 @@ use anyhow::Result;
 use clap::Parser;
 use dsi_progress_logger::no_logging;
 use mem_dbg::{MemSize, SizeFlags};
-use sux::bit_field_vec;
+use sux::bits::BitFieldVec;
 use sux::cli::{INCR, bench, init_env_logger};
 use sux::func::{PHastR, PHastRBuilder};
 use sux::utils::FromCloneableIntoIterator;
@@ -59,7 +59,9 @@ fn main() -> Result<()> {
         )
     })?;
 
-    let mut output = bit_field_vec![(args.n - 1).ilog2() as usize + 1 => 0; args.n];
+    // Unaligned reads need a padding word at the end of the vector
+    let mut output =
+        BitFieldVec::<Box<[usize]>>::new_padded((args.n - 1).ilog2() as usize + 1, args.n);
     for i in 0..n {
         output.set_value(func.get(i), i as usize);
     }

@@ -7,7 +7,7 @@ parameters, and how they map to paper figures.
 Each entry in METHODS specifies:
   - tool: "sux" (VFilter/VFunc), "burr" (BuRR ribbon), "csf"
     (BuRR-VL compressed static functions), "comp-vfunc" (sux-rs
-    CompVFunc), "phast" (PHast+), "mmphf" (monotone MMPHF, integer
+    CompVFunc), "phastr" (PHastR + array), "mmphf" (monotone MMPHF, integer
     keys), "mmphf-str" (monotone MMPHF, string keys), "lemonhash"
     (LeMonHash, integer keys), "lemonhash-str" (LeMonHash, string
     keys), "java" (Sux4J GOV3)
@@ -54,7 +54,7 @@ SUX_PROFILE = "bench"
 # metric, not a build parameter).  Used as the default when a method
 # does not set "bits_agnostic" explicitly.
 BITS_AGNOSTIC_TOOLS = frozenset({
-    "csf", "comp-vfunc", "phast", "mmphf", "lemonhash",
+    "csf", "comp-vfunc", "phastr", "mmphf", "lemonhash",
 })
 
 # --- Method definitions ---
@@ -279,24 +279,25 @@ METHODS = {
         "bits_agnostic": True,
         "build_threads": DEFAULT_THREADS,
         "max_log2": 32,
-        # Compared against PHast+, whose build+query run in one process
+        # Compared against PHastR + array, whose build+query run in one process
         # and therefore cannot be pinned.  Run VFunc queries unpinned
         # too so the comparison is apples-to-apples.
         "pin_query": False,
     },
     # -----------------------------------------------------------------
-    # PHast+ (minimal perfect hash + array)
+    # PHastR (minimal perfect hash + array)
     # -----------------------------------------------------------------
     #
-    # bench_phast builds a PHast+ function and queries it in-process.
+    # bench_phastr_array (phastr-array crate) builds a PHastR + array
+    # function and queries it in-process.
     # Bits-agnostic (bits/key is a result metric).
     # No separate build/query phases — construction and queries run in
     # a single invocation.
     #
-    # Run:  bench_phast <n> <query_keys> <threads>
-    "Phast": {
-        "tool": "phast",
-        "label": "PHast+",
+    # Run:  bench_phastr_array <n> <query_keys> <threads>
+    "PHastR": {
+        "tool": "phastr",
+        "label": "PHastR",
         "build_threads": DEFAULT_THREADS,
         "max_log2": 32,
     },
@@ -481,17 +482,17 @@ FIGURES = {
         "column": "query_min",
         "ylabel": "ns/key",
     },
-    # --- PHast+ comparison: no bit width suffix ---
+    # --- PHastR comparison: no bit width suffix ---
     # Bits-agnostic: phast-build.pdf, phast-query.pdf.
     "phast-build": {
-        "title": "PHast+ vs VFunc Construction",
-        "methods": ["Phast", "VFunc"],
+        "title": "PHastR vs VFunc Construction",
+        "methods": ["PHastR", "VFunc"],
         "column": "constr_ns",
         "ylabel": "ns/key",
     },
     "phast-query": {
-        "title": "PHast+ vs VFunc Queries",
-        "methods": ["Phast", "VFunc"],
+        "title": "PHastR vs VFunc Queries",
+        "methods": ["PHastR", "VFunc"],
         "column": "query_min",
         "ylabel": "ns/key",
     },

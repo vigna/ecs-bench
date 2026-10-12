@@ -93,7 +93,7 @@ def sux_target_dir(sux_dir):
     return Path(sux_dir) / "target"
 
 
-_PARSE_TOOL_MAP = {"csf": "burr", "comp-vfunc": "sux", "phast": "sux",
+_PARSE_TOOL_MAP = {"csf": "burr", "comp-vfunc": "sux", "phastr": "sux",
                    "mmphf": "sux", "lemonhash": "sux", "java": "sux",
                    "hem": "sux",
                    "mmphf-str": "sux", "lemonhash-str": "sux"}
@@ -260,7 +260,6 @@ def ensure_sux_built(sux_dir, need_comp_vfunc=False):
         "--example", "bench_vfunc",
         "--bin", "comp_vfunc",
         "--example", "bench_comp_vfunc",
-        "--example", "bench_phast",
     ]
     r = subprocess.run(cmd, cwd=str(sux), capture_output=True, text=True)
     if r.returncode != 0:
@@ -428,6 +427,29 @@ def ensure_hem_built():
     if r.returncode != 0:
         print(r.stderr, file=sys.stderr)
         print("WARNING: hem-vfilter build failed, skipping HEM methods")
+        return False
+    return True
+
+
+def phastr_array_target_dir():
+    """Return the cargo target directory of the phastr-array crate."""
+    return Path(REPO_ROOT) / "phastr-array" / "target"
+
+
+def ensure_phastr_array_built():
+    """Compile the PHastR + array static function compared with VFunc."""
+    crate = Path(REPO_ROOT) / "phastr-array"
+    if not crate.exists():
+        print("WARNING: phastr-array/ not found, skipping PHastR methods")
+        return False
+    print(f"Building phastr-array binaries in {crate}\u2026")
+    r = subprocess.run(
+        ["cargo", "build", "--profile", SUX_PROFILE],
+        cwd=str(crate), capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        print("WARNING: phastr-array build failed, skipping PHastR methods")
         return False
     return True
 
@@ -768,7 +790,6 @@ def cmd_bench(args):
     # Ensure binaries are compiled.
     sux_needed = any(METHODS[m]["tool"] == "sux" for m in methods)
     comp_vfunc_needed = any(METHODS[m]["tool"] == "comp-vfunc" for m in methods)
-    phast_needed = any(METHODS[m]["tool"] == "phast" for m in methods)
     burr_needed = any(METHODS[m]["tool"] == "burr" for m in methods)
     csf_needed = any(METHODS[m]["tool"] == "csf" for m in methods)
     mmphf_needed = any(METHODS[m]["tool"] == "mmphf" for m in methods)
@@ -782,7 +803,7 @@ def cmd_bench(args):
     lemonhash_str_ok = True
     java_ok = True
 
-    if sux_needed or comp_vfunc_needed or phast_needed:
+    if sux_needed or comp_vfunc_needed:
         ensure_sux_built(args.sux_dir, need_comp_vfunc=comp_vfunc_needed)
     if mmphf_needed or mmphf_str_needed:
         ensure_mmphf_built(args.sux_dir)
@@ -797,6 +818,9 @@ def cmd_bench(args):
     if any(METHODS[m]["tool"] == "hem" for m in methods):
         if not ensure_hem_built():
             methods = [m for m in methods if METHODS[m]["tool"] != "hem"]
+    if any(METHODS[m]["tool"] == "phastr" for m in methods):
+        if not ensure_phastr_array_built():
+            methods = [m for m in methods if METHODS[m]["tool"] != "phastr"]
 
     if java_needed:
         java_ok = ensure_java_built()
@@ -893,8 +917,8 @@ def cmd_bench(args):
         elif cfg["tool"] == "burr":
             _bench_burr(cfg, method_name, n, bits, log2_n,
                         rdir, args)
-        elif cfg["tool"] == "phast":
-            _bench_phast(cfg, method_name, n, log2_n,
+        elif cfg["tool"] == "phastr":
+            _bench_phastr(cfg, method_name, n, log2_n,
                          rdir, args)
         elif cfg["tool"] == "mmphf":
             _bench_mmphf(cfg, method_name, n, log2_n,
@@ -1019,14 +1043,13 @@ def _bench_comp_vfunc(cfg, method_name, n, log2_n, rdir, args):
         outfile.unlink()
 
 
-def _bench_phast(cfg, method_name, n, log2_n, rdir, args):
-    """Run a PHast+ benchmark: build and query in one invocation.
+def _bench_phastr(cfg, method_name, n, log2_n, rdir, args):
+    """Run a PHastR + array benchmark: build and query in one invocation.
 
-    bench_phast <n> <query_keys> <threads> --repeats 5
+    bench_phastr_array <n> <query_keys> <threads> --repeats 5
     Output (construction + queries) goes to stderr.
     """
-    target = sux_target_dir(args.sux_dir)
-    cmd = [str(target / "release" / "examples" / "bench_phast")]
+    cmd = [str(phastr_array_target_dir() / "release" / "bench_phastr_array")]
     cmd += [str(n), str(cfg.get("query_keys", QUERY_KEYS))]
 
     threads = cfg.get("build_threads")
@@ -1034,7 +1057,7 @@ def _bench_phast(cfg, method_name, n, log2_n, rdir, args):
         threads = args.threads
     cmd += [str(threads or 1)]
 
-    # PHast+ builds and queries in a single process, so we run unpinned
+    # PHastR + array builds and queries in a single process, so we run unpinned
     # (pinning would force multi-threaded construction onto one core).
     print(f"  bench {method_name} n=2^{log2_n}")
     result = run_cmd(cmd, dry_run=args.dry_run)
@@ -1426,7 +1449,7 @@ def cmd_par_bench(args):
         if cfg["tool"] == "burr" and not burr_ok:
             print(f"Skipping {method_name} (BuRR not available)")
             continue
-        if cfg["tool"] in ("csf", "comp-vfunc", "phast", "mmphf", "lemonhash",
+        if cfg["tool"] in ("csf", "comp-vfunc", "phastr", "mmphf", "lemonhash",
                           "mmphf-str", "lemonhash-str", "java"):
             continue
         if cfg.get("bits_agnostic"):

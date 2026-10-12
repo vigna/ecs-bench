@@ -111,7 +111,7 @@ def parse_bits_per_key(text, n=None):
     Every builder logs the in-memory occupancy of the structure it just
     built.  Recognized formats:
 
-        "Bits/key: 8.001 ..."            (sux-rs, Sux4J BenchBuilder, bench_phast)
+        "Bits/key: 8.001 ..."            (sux-rs, Sux4J BenchBuilder, bench_phastr_array)
         "= 12.345 bits/key"              (bench_csf, bench_lemonhash[_str])
         "Ribbon size: 12345 Bytes ..."   (BuRR) — combined with ``n`` below.
 
