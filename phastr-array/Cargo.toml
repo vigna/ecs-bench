@@ -1,0 +1,25 @@
+# PHastR + array: the static function the paper compares with VFunc.
+# Lives in ecs-bench rather than in sux because it is of no interest outside
+# the paper.
+[package]
+name = "phastr-array"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+sux = { path = "../sux-rs", features = ["cli"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dsi-progress-logger = "0.8.7"
+mem_dbg = "0.4.1"
+rayon = "1"
+value-traits = "0.3.0"
+
+[profile.bench]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = true
