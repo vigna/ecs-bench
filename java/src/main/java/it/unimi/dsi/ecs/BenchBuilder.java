@@ -5,24 +5,42 @@ import it.unimi.dsi.sux4j.mph.GV3CompressedFunction;
 import it.unimi.dsi.sux4j.mph.codec.Codec;
 import it.unimi.dsi.bits.TransformationStrategies;
 import it.unimi.dsi.fastutil.longs.LongArrayList;
-import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Iterator;
+import java.util.NoSuchElementException;
 import java.util.SplittableRandom;
 
 public class BenchBuilder {
 
-	private static ObjectArrayList<byte[]> generateKeys(final long n) {
-		final ObjectArrayList<byte[]> keys = new ObjectArrayList<>();
-		final ByteBuffer buf = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
-		for (long i = 0; i < n; i++) {
-			buf.clear();
-			buf.putLong(i);
-			keys.add(buf.array().clone());
-		}
-		return keys;
+	/** The keys 0, 1, …, n&minus;1, little-endian, generated lazily.
+	 *
+	 * <p>Materializing them would cost about 34 GB at n = 2<sup>30</sup> (an
+	 * object header and a reference per key), which is the size at which the
+	 * paper's tables are built. Sux4J only iterates over the keys — twice, if
+	 * a construction has to be retried — so a fresh iterator per call is
+	 * enough. The sequence is identical to the materialized one.
+	 */
+	private static Iterable<byte[]> generateKeys(final long n) {
+		return () -> new Iterator<byte[]>() {
+			private final ByteBuffer buf = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
+			private long i = 0;
+
+			@Override
+			public boolean hasNext() {
+				return i < n;
+			}
+
+			@Override
+			public byte[] next() {
+				if (i >= n) throw new NoSuchElementException();
+				buf.clear();
+				buf.putLong(i++);
+				return buf.array().clone();
+			}
+		};
 	}
 
 	private static LongArrayList generateGeometric(final long n) {
@@ -84,7 +102,7 @@ public class BenchBuilder {
 
 		final String type = args[0];
 		final long n = Long.parseLong(args[1]);
-		final ObjectArrayList<byte[]> keys = generateKeys(n);
+		final Iterable<byte[]> keys = generateKeys(n);
 
 		if ("GOV3Function".equals(type)) {
 			final int bits = Integer.parseInt(args[2]);

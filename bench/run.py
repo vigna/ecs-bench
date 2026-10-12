@@ -95,6 +95,7 @@ def sux_target_dir(sux_dir):
 
 _PARSE_TOOL_MAP = {"csf": "burr", "comp-vfunc": "sux", "phast": "sux",
                    "mmphf": "sux", "lemonhash": "sux", "java": "sux",
+                   "hem": "sux",
                    "mmphf-str": "sux", "lemonhash-str": "sux"}
 
 
@@ -408,6 +409,29 @@ for _b in ODD_BITS:
 _SUX4J_C_VARIANTS[("csf", True)] = ("test_csf3_uint64", [])
 
 
+def hem_target_dir():
+    """Return the cargo target directory of the hem-vfilter crate."""
+    return Path(REPO_ROOT) / "hem-vfilter" / "target"
+
+
+def ensure_hem_built():
+    """Compile the HEM-sharded VFilter used as the sharding ablation."""
+    hem = Path(REPO_ROOT) / "hem-vfilter"
+    if not hem.exists():
+        print("WARNING: hem-vfilter/ not found, skipping HEM methods")
+        return False
+    print(f"Building hem-vfilter binaries in {hem}\u2026")
+    r = subprocess.run(
+        ["cargo", "build", "--profile", SUX_PROFILE],
+        cwd=str(hem), capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        print("WARNING: hem-vfilter build failed, skipping HEM methods")
+        return False
+    return True
+
+
 def ensure_sux4j_c_built(bits_values):
     """Compile the Sux4J C test harnesses for the requested bit widths."""
     sux4j_c = Path(REPO_ROOT) / "Sux4J" / "c"
@@ -635,6 +659,38 @@ def csf_query_cmd(cfg, n, infile):
     return cmd
 
 
+def hem_build_cmd(cfg, n, bits, outfile, args):
+    """Assemble the hem_vfilter build command line.
+
+    The number of shards is left to the binary, which by default picks the
+    one VFilter would pick for the same key set: the comparison is then a
+    pure layout ablation.
+
+    Example:
+        hem_vfilter -n 1048576 --bits 9 output.bin
+    """
+    cmd = [str(hem_target_dir() / "release" / "hem_vfilter")]
+    cmd += ["-n", str(n)]
+    if bits > 0:
+        cmd += ["--bits", str(bits)]
+        # Mirror sux_build_cmd exactly: the two structures must use the same
+        # value backend, or the comparison measures the backend instead of
+        # the sharding.
+        if args.unaligned and bits not in EVEN_BITS:
+            cmd += ["--unaligned"]
+    cmd += cfg.get("build_extra", [])
+    cmd += [str(outfile)]
+    return cmd
+
+
+def hem_query_cmd(cfg, n, bits, infile, args):
+    """Assemble the bench_hem_vfilter query command line."""
+    cmd = [str(hem_target_dir() / "release" / "bench_hem_vfilter")]
+    cmd += [str(cfg.get("query_keys", QUERY_KEYS))]
+    cmd += [str(infile)]
+    return cmd
+
+
 def java_build_cmd(cfg, n, bits, outfile):
     """Assemble the Java BenchBuilder command line."""
     java_dir = Path(REPO_ROOT) / "java"
@@ -738,12 +794,16 @@ def cmd_bench(args):
         lemonhash_ok = ensure_lemonhash_built()
     if lemonhash_str_needed:
         lemonhash_str_ok = ensure_lemonhash_str_built()
+    if any(METHODS[m]["tool"] == "hem" for m in methods):
+        if not ensure_hem_built():
+            methods = [m for m in methods if METHODS[m]["tool"] != "hem"]
+
     if java_needed:
         java_ok = ensure_java_built()
         if java_ok:
-            filter_bits = bits_list if any(
-                METHODS[m].get("java_type") == "GOV3Function" for m in methods
-                if METHODS[m]["tool"] == "java") else []
+            java_types = {METHODS[m].get("java_type") for m in methods
+                          if METHODS[m]["tool"] == "java"}
+            filter_bits = bits_list if "GOV3Function" in java_types else []
             java_ok = ensure_sux4j_c_built(filter_bits)
 
     # --- String-dataset methods (iterate over files in data/) ---
@@ -801,6 +861,10 @@ def cmd_bench(args):
         for bits in method_bits:
             if explicit_sizes is not None:
                 for n in explicit_sizes:
+                    # --max-log2 must tighten an explicit size list too, or a
+                    # smoke run at 2^20 would silently also build 2^30.
+                    if n.bit_length() - 1 > max_log2:
+                        continue
                     work.append((n.bit_length() - 1, method_name, bits))
             else:
                 for log2_n in range(MIN_LOG2, max_log2 + 1):
@@ -841,6 +905,9 @@ def cmd_bench(args):
         elif cfg["tool"] == "java":
             _bench_java(cfg, method_name, n, bits, log2_n,
                         rdir, args)
+        elif cfg["tool"] == "hem":
+            _bench_sux(cfg, method_name, n, bits, log2_n,
+                       rdir, args)
         else:
             _bench_sux(cfg, method_name, n, bits, log2_n,
                        rdir, args)
@@ -1221,8 +1288,14 @@ def _bench_sux(cfg, method_name, n, bits, log2_n, rdir, args):
     ddir = data_dir(args.results_dir, method_name)
     outfile = ddir / f"filter.{n}.{bits}.bin"
 
+    # The HEM ablation is driven exactly like a sux-rs method: same build /
+    # query split, same output format, only different binaries.
+    is_hem = cfg["tool"] == "hem"
+    build_cmd_fn = hem_build_cmd if is_hem else sux_build_cmd
+    query_cmd_fn = hem_query_cmd if is_hem else sux_query_cmd
+
     # --- Build (unpinned) ---
-    cmd = sux_build_cmd(cfg, n, bits, outfile, args)
+    cmd = build_cmd_fn(cfg, n, bits, outfile, args)
     bits_str = f" bits={bits}" if bits > 0 else ""
     print(f"  bench {method_name} n=2^{log2_n}{bits_str}")
     result = run_cmd(cmd, dry_run=args.dry_run)
@@ -1230,7 +1303,7 @@ def _bench_sux(cfg, method_name, n, bits, log2_n, rdir, args):
     # --- Query (pinned by default; see cfg["pin_query"]) ---
     qr = None
     if not cfg.get("no_queries"):
-        qcmd = sux_query_cmd(cfg, n, bits, outfile, args)
+        qcmd = query_cmd_fn(cfg, n, bits, outfile, args)
         if args.dry_run or result.returncode == 0:
             pin = args.pin if cfg.get("pin_query", True) else None
             qr = run_cmd(qcmd, pin=pin, dry_run=args.dry_run)
@@ -1336,6 +1409,9 @@ def cmd_par_bench(args):
 
     if sux_needed:
         ensure_sux_built(args.sux_dir)
+    if any(METHODS[m]["tool"] == "hem" for m in methods):
+        if not ensure_hem_built():
+            methods = [m for m in methods if METHODS[m]["tool"] != "hem"]
     if burr_needed:
         burr_ok = ensure_burr_built(args.burr_dir, bits_list)
 
@@ -1385,6 +1461,8 @@ def cmd_par_bench(args):
 
         if cfg["tool"] == "sux":
             build_cmd = sux_build_cmd(cfg, n, bits, outfile, args)
+        elif cfg["tool"] == "hem":
+            build_cmd = hem_build_cmd(cfg, n, bits, outfile, args)
         else:
             build_cmd = burr_bench_cmd(cfg, n, bits, args,
                                        serialize_to=outfile)
@@ -1409,6 +1487,8 @@ def cmd_par_bench(args):
         # --- Parallel queries ---
         if cfg["tool"] == "sux":
             qcmd = sux_query_cmd(cfg, n, bits, outfile, args)
+        elif cfg["tool"] == "hem":
+            qcmd = hem_query_cmd(cfg, n, bits, outfile, args)
         else:
             qcmd = burr_query_cmd(cfg, n, bits, outfile, args)
 
@@ -1418,7 +1498,7 @@ def cmd_par_bench(args):
         jobs = []
         for i in range(args.jobs):
             out_file = instance_dir / f"{i}.err"
-            if cfg["tool"] == "sux":
+            if cfg["tool"] in ("sux", "hem"):
                 job = shlex.join(qcmd) + f" 2>{out_file}"
             else:
                 job = shlex.join(qcmd) + f" >{out_file}"
@@ -1851,6 +1931,19 @@ TABLES = {
                        "query_seq": "FuseLge3Shards", "query_par": "FuseLge3Shards"}),
             ("MWHC", {"constr_seq": None, "constr_par": "Mwhc3",
                       "query_seq": "Mwhc3", "query_par": "Mwhc3"}),
+            # The sharding ablation: VFunc's construction, laid out as HEM
+            # would lay it out. Everything but the offset/seed indirection is
+            # held fixed, so the gap against the VFunc row is that
+            # indirection. Construction is single-threaded here (no lazy
+            # Gaussian elimination, no parallel builder), so we report only
+            # queries.
+            ("HEM(Fuse)", {"constr_seq": None, "constr_par": None,
+                           "query_seq": "HemVFilter", "query_par": "HemVFilter"}),
+            # HEM as actually shipped: Sux4J's GOV3, queried by the C code
+            # distributed with Sux4J. Its much finer sharding is forced by
+            # lazy Gaussian elimination, so its offset array is far larger.
+            ("HEM(GOV3)", {"constr_seq": None, "constr_par": None,
+                           "query_seq": "GOV3Function", "query_par": "GOV3Function"}),
             ("Fuse(64)", {"constr_seq": "Fuse3NoShards64", "constr_par": None,
                           "query_seq": "Fuse3NoShards64", "query_par": "Fuse3NoShards64"}),
             ("Fuse(128)", {"constr_seq": "Fuse3NoShards128", "constr_par": None,

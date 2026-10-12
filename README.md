@@ -24,7 +24,10 @@ live in the [`sux`](https://github.com/vigna/sux-rs) Rust crate.
 - `Sux4J/`, `BuRR/`, `BuRR-VL/`, `LearnedStaticFunction/`, `MMPHF-Experiments/`:
   pinned submodules of competing implementations.
 - `sux-rs/`: pinned submodule of `sux`.
-- `java/`: Maven project for the Sux4J GOV3 build path.
+- `java/`: Maven project for the Sux4J GOV3 build path (one of the two HEM
+  baselines; see below).
+- `hem-vfilter/`: a HEM-sharded clone of VFilter, the paper's sharding
+  ablation (see below).
 - `Makefile`: builds the C++ benches (BuRR, `bench_csf`, `bench_lemonhash`,
   `bench_lemonhash_str`). Its `init` target pulls submodules and applies the
   fairness patches in `lemonhash-vl-string-view.patch` and
@@ -148,6 +151,60 @@ never recomputes a data point that already has a result file, so it is safe
 Explore the help of `run.py` for more fine-grained control, e.g. to run only a
 subset of methods or sizes, or to keep the transient serialized data (which is
 deleted by default to save space).
+
+### The HEM baselines
+
+The paper claims that ε-cost sharding removes an offset and a local seed from
+the query path, and with them a memory dependency. Two methods measure that
+claim.
+
+**`HemVFilter`** is the ablation. The `hem-vfilter/` crate builds a filter that
+matches `FuseLge3Shards` in every part but the layout: same signatures, same
+shard selection, same fuse-graph edges, same expansion factor, same
+segment-size law, same value backends, same number of shards. Only the layout
+differs. Shards keep their natural, unequal sizes, so the builder stores their
+start positions in an array, and gives each shard a local seed. A query must
+load that array before it can build its edge. When a shard peels at the first
+try its seed is zero, and its edges and hashes are those of `VFilter`, bit for
+bit.
+
+The crate lives here and not in `sux`, because HEM is the scheme the paper
+replaces. Its query benchmark follows the protocol of `bench_vfilter`, and the
+harness drives it like any sux-rs method:
+
+```sh
+python bench/run.py bench --method HemVFilter,FuseLge3Shards --bits 8
+```
+
+The crate does not implement lazy Gaussian elimination, so it refuses fewer
+than a million keys. It also keeps all signatures in core, where `VFilter`
+streams them through a disk-backed store, so it stops at 2³² keys. It also remixes the local seed with one multiplication,
+where Sux4J re-hashes the whole signature. The measured gap is therefore a
+lower bound. `hem-vfilter/src/lib.rs` explains both points, and why a cheaper
+remix fails.
+
+To check a build instead of timing it:
+
+```sh
+hem-vfilter/target/release/hem_vfilter -n 4000000 --bits 8 /tmp/f.bin
+hem-vfilter/target/release/bench_hem_vfilter 4000000 /tmp/f.bin --check
+```
+
+The filter must find every key, and the false-positive rate must match 2⁻ᵇ.
+
+**`GOV3Function`** is HEM as shipped. `java/` builds it, and the Sux4J C code
+queries it. GOV3 solves each shard by lazy Gaussian elimination, which is cubic
+and forces buckets of about 1500 keys (`GOV3Function.BUCKET_SIZE`). At 2³⁰ keys
+that gives some 716 000 buckets and an offset array of several megabytes,
+against the few dozen shards `VFilter` picks. The solver and the space also
+differ, so this row is not an ablation: it shows what HEM costs in practice.
+
+`HemVFilter` appears in the query figures and in the filter table, and answers
+to `par-bench` like any sux-rs method. It does not appear in the construction
+figures: its plain peeling loop and missing lazy Gaussian elimination would
+make its build time differ from `VFilter`'s for reasons that have nothing to do
+with sharding. GOV3 reports no construction time either, because Java builds
+it.
 
 ### CPU pinning
 

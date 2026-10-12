@@ -121,9 +121,12 @@ def parse_bits_per_key(text, n=None):
     Returns:
         float (bits/key) or None.
     """
-    m = re.search(r'Bits/key:\s*([\d.]+)', text)
-    if m:
-        return float(m.group(1))
+    # Structures with substructures (e.g., LcpMmphf, Lcp2Mmphf) log a
+    # Bits/key line for each inner function before the one for the whole
+    # structure, which is the last
+    ms = re.findall(r'Bits/key:\s*([\d.]+)', text)
+    if ms:
+        return float(ms[-1])
     m = re.search(r'=\s*([\d.]+)\s*bits/key', text)
     if m:
         return float(m.group(1))

@@ -135,6 +135,33 @@ METHODS = {
         "build_extra": ["--eps", "0.01"],
     },
     # -----------------------------------------------------------------
+    # HEM-sharded VFilter (the sharding ablation)
+    # -----------------------------------------------------------------
+    #
+    # Identical to FuseLge3Shards in every respect but the layout: same
+    # signatures, same shard selection, same fuse-graph edges, same expansion
+    # factor and segment-size law, same value backends, and by default the
+    # same number of shards. What differs is that shards keep their natural,
+    # unequal sizes, so their offsets have to be stored and loaded, and each
+    # shard carries a local seed. The gap against VFilter is therefore the
+    # cost of the offset/seed indirection alone. See hem-vfilter/src/lib.rs.
+    #
+    # Build:  hem_vfilter -n <n> --bits <b> <outfile>
+    # Query:  bench_hem_vfilter <query_keys> <outfile>
+    # The builder keeps all signatures in core (VFilter streams them through a
+    # disk-backed store), so it needs about 32 bytes per key while sharding.
+    # That fits 2^32 keys on a 384 GiB machine, and no more.
+    #
+    # This method appears in the query figures and in the filter table, but not
+    # in the construction figures: it has no lazy Gaussian elimination and a
+    # plain peeling loop, so its build time would differ from VFilter's for
+    # reasons that have nothing to do with sharding.
+    "HemVFilter": {
+        "tool": "hem",
+        "label": "HEM(Fuse)",
+        "max_log2": 32,
+    },
+    # -----------------------------------------------------------------
     # BuRR (Bumped Ribbon Retrieval) methods
     # -----------------------------------------------------------------
     #
@@ -341,9 +368,15 @@ METHODS = {
     # Build: Java BenchBuilder creates GOV3Function/GV3CompressedFunction
     #        with LE-encoded uint64 keys, dumps C-binary.
     # Query: C test harness (sf3/csf3) loads dump, benchmarks queries.
+    # Also the HEM baseline for the paper: GOV3 shards with the Heuristic
+    # External Memory scheme of Botelho, Pagh and Ziviani, so a query must
+    # load an offset and a local seed before it can generate its edge. That
+    # is the indirection epsilon-cost sharding removes. Queries run through
+    # the C code distributed with Sux4J, so the comparison with the Rust
+    # implementations is not affected by the language.
     "GOV3Function": {
         "tool": "java",
-        "label": "GOV3 (Sux4J)",
+        "label": "HEM/GOV3 (Sux4J)",
         "java_type": "GOV3Function",
         "sizes": [1 << 20, 1 << 30],
     },
@@ -408,6 +441,7 @@ FIGURES = {
             "Fuse3NoShards64",
             "Fuse3NoShards128",
             "FuseLge3Shards",
+            "HemVFilter",
             "Mwhc3",
             "BuRR",
         ],
@@ -420,6 +454,7 @@ FIGURES = {
             "Fuse3NoShards64",
             "Fuse3NoShards128",
             "FuseLge3Shards",
+            "HemVFilter",
             "Mwhc3",
             "BuRR",
         ],
