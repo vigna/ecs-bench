@@ -60,6 +60,7 @@ from configs import (  # noqa: E402
     METHODS,
     MIN_LOG2,
     ODD_BITS,
+    PARALLEL,
     QUERY_KEYS,
     SUX_FEATURES,
     SUX_PROFILE,
@@ -119,6 +120,18 @@ def effective_max_log2(args, cfg):
     if args.max_log2 is not None:
         cap = min(cap, args.max_log2)
     return cap
+
+
+def build_threads(cfg, key, args, default=None):
+    """Thread count of a method's build, as configured in cfg[key].
+
+    --threads replaces only the PARALLEL marker, so methods with a fixed
+    count (e.g., the -seq variants) keep it; None means no flag is passed.
+    """
+    threads = cfg.get(key, default)
+    if threads == PARALLEL:
+        return args.threads if args.threads is not None else DEFAULT_THREADS
+    return threads
 
 
 def result_complete(path, tool, no_queries=False):
@@ -533,9 +546,7 @@ def sux_build_cmd(cfg, n, bits, outfile, args):
     cmd += cfg.get("build_extra", [])
 
     # Thread count (omit if None = default / single-threaded)
-    threads = cfg.get("build_threads")
-    if args.threads is not None:
-        threads = args.threads
+    threads = build_threads(cfg, "build_threads", args)
     if threads is not None:
         cmd += ["--threads", str(threads)]
 
@@ -582,9 +593,7 @@ def burr_bench_cmd(cfg, n, bits, args, serialize_to=None):
     binary = f"{cfg['burr_binary']}{bits}"
     cmd = [str(burr / binary)]
 
-    threads = cfg.get("burr_threads", 1)
-    if args.threads is not None:
-        threads = args.threads
+    threads = build_threads(cfg, "burr_threads", args, default=1)
     cmd += ["-t", str(threads)]
 
     cmd += cfg["burr_flags"]
@@ -629,9 +638,7 @@ def comp_vfunc_build_cmd(cfg, n, outfile, args):
     cmd += ["--shard-edge", cfg["shard_edge"]]
     cmd += ["--huffman-entropy-threshold", "1"]
 
-    threads = cfg.get("build_threads")
-    if args.threads is not None:
-        threads = args.threads
+    threads = build_threads(cfg, "build_threads", args)
     if threads is not None:
         cmd += ["--threads", str(threads)]
 
@@ -1052,9 +1059,7 @@ def _bench_phastr(cfg, method_name, n, log2_n, rdir, args):
     cmd = [str(phastr_array_target_dir() / "release" / "bench_phastr_array")]
     cmd += [str(n), str(cfg.get("query_keys", QUERY_KEYS))]
 
-    threads = cfg.get("build_threads")
-    if args.threads is not None:
-        threads = args.threads
+    threads = build_threads(cfg, "build_threads", args)
     cmd += [str(threads or 1)]
 
     # PHastR + array builds and queries in a single process, so we run unpinned
@@ -1897,7 +1902,8 @@ def cmd_status(args):
                 sizes = [1 << log2 for log2 in range(MIN_LOG2, max_log2 + 1)]
             for n in sizes:
                 total += 1
-                if result_complete(rdir / f"bench.{n}.{bits}.err", tool_for_parse):
+                if result_complete(rdir / f"bench.{n}.{bits}.err", tool_for_parse,
+                                   no_queries=cfg.get("no_queries", False)):
                     done_bench += 1
                 pq_path = rdir / f"parbench.{n}.{bits}.err"
                 if pq_path.exists() and "query_min" in parse_query(
@@ -2489,7 +2495,9 @@ def make_parser():
     p.add_argument("--pin", default=os.environ.get("BENCH_PIN"),
                    help="CPU-pinning prefix, e.g. 'chrt -f 99 taskset -c 2'")
     p.add_argument("--threads", type=int, default=None,
-                   help="Override thread count for parallel builds")
+                   help="Thread count for parallel builds (default: "
+                        f"{DEFAULT_THREADS}); single-threaded methods "
+                        "are not affected")
     p.add_argument("--dry-run", action="store_true",
                    help="Print commands without executing")
     p.add_argument("--force", action="store_true",

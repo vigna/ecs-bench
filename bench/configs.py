@@ -39,8 +39,14 @@ QUERY_KEYS = 100_000_000
 
 import os
 
-# Default thread count for parallel construction (build_threads).
+# Default thread count for parallel construction.
 DEFAULT_THREADS = max(1, os.cpu_count() // 2)
+
+# Marker for the build_threads/burr_threads of methods whose construction is
+# parallel: it resolves to --threads if given, and to DEFAULT_THREADS
+# otherwise. Methods with a fixed count (e.g., the -seq variants, which measure
+# single-threaded construction) are not affected by --threads.
+PARALLEL = "parallel"
 
 # Default number of parallel query instances for par-bench.
 DEFAULT_PAR_JOBS = DEFAULT_THREADS
@@ -107,7 +113,7 @@ METHODS = {
         "shard_edge": "fuse-lge3-shards",
         "build_bin": "vfilter",
         "bench_bin": "bench_vfilter",
-        "build_threads": DEFAULT_THREADS,
+        "build_threads": PARALLEL,
         "max_log2": 33,
     },
     "FuseLge3Shards-seq": {
@@ -129,7 +135,7 @@ METHODS = {
         "shard_edge": "mwhc3",
         "build_bin": "vfilter",
         "bench_bin": "bench_vfilter",
-        "build_threads": DEFAULT_THREADS,
+        "build_threads": PARALLEL,
         "max_log2": 33,
         # MWHC uses a slightly larger epsilon to shard finely
         "build_extra": ["--eps", "0.01"],
@@ -181,7 +187,7 @@ METHODS = {
         "label": "BuRR",
         "burr_binary": "bench",
         "burr_flags": ["-L", "64", "-2", "-I"],
-        "burr_threads": DEFAULT_THREADS,
+        "burr_threads": PARALLEL,
         "max_log2": 33,
     },
     "BuRR-seq": {
@@ -277,7 +283,7 @@ METHODS = {
         "build_bin": "vfunc",
         "bench_bin": "bench_vfunc",
         "bits_agnostic": True,
-        "build_threads": DEFAULT_THREADS,
+        "build_threads": PARALLEL,
         "max_log2": 32,
         # Compared against PHastR + array, whose build+query run in one process
         # and therefore cannot be pinned.  Run VFunc queries unpinned
@@ -298,7 +304,7 @@ METHODS = {
     "PHastR": {
         "tool": "phastr",
         "label": "PHastR",
-        "build_threads": DEFAULT_THREADS,
+        "build_threads": PARALLEL,
         "max_log2": 32,
     },
     # -----------------------------------------------------------------
