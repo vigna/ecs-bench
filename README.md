@@ -135,10 +135,11 @@ never recomputes a data point that already has a result file, so it is safe
 4. For the parallel-query column of the paper:
 
    ```sh
-   python bench/run.py par-bench --max-log2 30 --jobs 96
+   python bench/run.py par-bench --threads 32
    ```
 
-   `--jobs` defaults to `cpu_count()//2` if omitted. `par-bench` will
+   `--jobs` sets the number of instances, and defaults to 32 (the number
+   used in the paper), or to the number of CPUs if smaller. `par-bench` will
    also automatically limit the maximum size based on the physical RAM.
 
 5. Render the figures and tables once the matrix is populated:

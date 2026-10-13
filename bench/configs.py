@@ -49,7 +49,7 @@ DEFAULT_THREADS = max(1, os.cpu_count() // 2)
 PARALLEL = "parallel"
 
 # Default number of parallel query instances for par-bench.
-DEFAULT_PAR_JOBS = DEFAULT_THREADS
+DEFAULT_PAR_JOBS = min(32, os.cpu_count())
 
 SUX_FEATURES = "cli,mwhc,rayon,epserde,deko"
 

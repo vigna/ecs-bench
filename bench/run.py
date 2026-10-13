@@ -21,9 +21,9 @@ Usage examples:
     python bench/run.py report --method FuseLge3Shards --bits 8
 
     # Parallel query benchmark (N instances via GNU parallel; defaults
-    # to cpu_count()//2, override with --jobs)
+    # to min(32, cpu_count()), override with --jobs)
     python bench/run.py par-bench --method FuseLge3Shards --bits 8 \\
-        --max-log2 30 --jobs 96
+        --max-log2 30
 
     # Generate paper figures
     python bench/run.py plot --figure filter-build --bits even
