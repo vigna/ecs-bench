@@ -1983,17 +1983,17 @@ TABLES = {
     },
     "mmphf": {
         "methods": [
-            ("LcpMmphfInt", "LcpMmphfInt"),
-            ("Lcp2MmphfInt", "Lcp2MmphfInt"),
-            ("LeMonHashInt", "LeMonHashInt"),
+            ("LcpMmphfInt", "LcpMmphf"),
+            ("Lcp2MmphfInt", "Lcp2Mmphf"),
+            ("LeMonHashInt", "LeMonHash"),
         ],
         "sizes": [1 << 20, 1 << 32],
     },
     "mmphf-str": {
         "methods": [
-            ("LcpMmphfStr", "Lcp"),
-            ("Lcp2MmphfStr", "Lcp2"),
-            ("LeMonHashStr", "LeMon"),
+            ("LcpMmphfStr", "LcpMmphf"),
+            ("Lcp2MmphfStr", "Lcp2Mmphf"),
+            ("LeMonHashStr", "LeMonHash"),
         ],
     },
     "comp": {

@@ -100,7 +100,7 @@ METHODS = {
         "build_bin": "vfilter",
         "bench_bin": "bench_vfilter",
         "build_threads": None,
-        "max_log2": 32,
+        "max_log2": 33,
         # For n ≥ 2^32 the high-memory peeling algorithm exceeds RAM;
         # --low-mem switches to a slower but leaner variant.
         "low_mem_threshold": 32,
@@ -165,7 +165,7 @@ METHODS = {
     "HemVFilter": {
         "tool": "hem",
         "label": "HEM(Fuse)",
-        "max_log2": 32,
+        "max_log2": 33,
     },
     # -----------------------------------------------------------------
     # BuRR (Bumped Ribbon Retrieval) methods
@@ -210,26 +210,26 @@ METHODS = {
     # Query:  bench_csf -n <n> --coder huffman -r <file>
     "CSF-Geo": {
         "tool": "csf",
-        "label": "CSF(geo)",
+        "label": "BuRR-CSF(geo)",
         "distribution": ["--geometric"],
         "coder": "huffman",
-        "max_log2": 30,
+        "max_log2": 31,
         "query_keys": 20_000_000,
     },
     "CSF-Zipf": {
         "tool": "csf",
-        "label": "CSF(zipf)",
+        "label": "BuRR-CSF(zipf)",
         "distribution": ["--zipf", "2000"],
         "coder": "huffman",
-        "max_log2": 30,
+        "max_log2": 31,
         "query_keys": 20_000_000,
     },
     "CSF-Uni256": {
         "tool": "csf",
-        "label": "CSF(uni256)",
+        "label": "BuRR-CSF(uni256)",
         "distribution": ["--uniform", "256"],
         "coder": "huffman",
-        "max_log2": 30,
+        "max_log2": 31,
         "query_keys": 20_000_000,
     },
     # -----------------------------------------------------------------
@@ -248,7 +248,7 @@ METHODS = {
         "distribution": ["--geometric"],
         "shard_edge": "fuse3-shards",
         "build_threads": 1,
-        "max_log2": 30,
+        "max_log2": 31,
     },
     "CompVFunc-Zipf": {
         "tool": "comp-vfunc",
@@ -256,7 +256,7 @@ METHODS = {
         "distribution": ["--zipf", "2000"],
         "shard_edge": "fuse3-shards",
         "build_threads": 1,
-        "max_log2": 30,
+        "max_log2": 31,
     },
     "CompVFunc-Uni256": {
         "tool": "comp-vfunc",
@@ -264,7 +264,7 @@ METHODS = {
         "distribution": ["--uniform", "256"],
         "shard_edge": "fuse3-shards",
         "build_threads": 1,
-        "max_log2": 30,
+        "max_log2": 31,
     },
     # -----------------------------------------------------------------
     # sux-rs VFunc (list index functions / minimal perfect hash)
@@ -284,7 +284,7 @@ METHODS = {
         "bench_bin": "bench_vfunc",
         "bits_agnostic": True,
         "build_threads": PARALLEL,
-        "max_log2": 32,
+        "max_log2": 33,
         # Compared against PHastR + array, whose build+query run in one process
         # and therefore cannot be pinned.  Run VFunc queries unpinned
         # too so the comparison is apples-to-apples.
@@ -305,7 +305,7 @@ METHODS = {
         "tool": "phastr",
         "label": "PHastR",
         "build_threads": PARALLEL,
-        "max_log2": 32,
+        "max_log2": 33,
     },
     # -----------------------------------------------------------------
     # Monotone MMPHF methods (integer keys)
@@ -324,19 +324,19 @@ METHODS = {
         "label": "LcpMmphf(int)",
         "variant": "lcp",
         "build_threads": 1,
-        "max_log2": 32,
+        "max_log2": 33,
     },
     "Lcp2MmphfInt": {
         "tool": "mmphf",
         "label": "Lcp2Mmphf(int)",
         "variant": "lcp2",
         "build_threads": 1,
-        "max_log2": 32,
+        "max_log2": 33,
     },
     "LeMonHashInt": {
         "tool": "lemonhash",
         "label": "LeMonHash(int)",
-        "max_log2": 32,
+        "max_log2": 33,
     },
     # -----------------------------------------------------------------
     # Monotone MMPHF methods (string keys from data/ directory)
