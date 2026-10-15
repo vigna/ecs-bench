@@ -424,12 +424,25 @@ METHODS = {
 #
 # The "bits" axis is handled at plot time: one PDF per bit width.
 # For "even" figures use bits in EVEN_BITS; for "odd" use ODD_BITS.
+#
+# Optional keys:
+#   "series_bits": plot each method once for each of these bit widths, in
+#                  a single PDF, rather than one PDF per bit width;
+#   "labels":      labels replacing those of METHODS;
+#   "y_group":     presets with the same group share the range of the
+#                  vertical axis (by default, each preset is its own group);
+#   "legend_loc":  location of the legend (by default, the one set by
+#                  matplotlibrc, that is, the best one for each plot);
+#   "legend_ncol": number of columns of the legend (by default, one);
+#   "ymax_factor": ratio between the upper limit of the vertical axis and
+#                  the largest value (by default, 1.15).
 
 FIGURES = {
     # --- Filters: per bit width ---
     # One PDF per bit width: filter-build-8.pdf, filter-query-32.pdf, etc.
     "filter-build": {
         "title": "Filter Construction ({bits} bits)",
+        "legend_loc": "upper left",
         "methods": [
             "Fuse3NoShards64",
             "Fuse3NoShards128",
@@ -444,6 +457,7 @@ FIGURES = {
     },
     "filter-query": {
         "title": "Filter Queries ({bits} bits)",
+        "legend_loc": "upper left",
         "methods": [
             "Fuse3NoShards64",
             "Fuse3NoShards128",
@@ -457,6 +471,7 @@ FIGURES = {
     },
     "filter-parquery": {
         "title": "Filter Parallel Queries ({bits} bits)",
+        "legend_loc": "upper left",
         "methods": [
             "Fuse3NoShards64",
             "Fuse3NoShards128",
@@ -468,10 +483,35 @@ FIGURES = {
         "column": "parbench_med",
         "ylabel": "ns/key",
     },
+    # --- Sharded vs unsharded sequential construction ---
+    # One PDF per family of bit widths, with a series for each method and
+    # width: sharding-even.pdf, sharding-odd.pdf.
+    "sharding-even": {
+        "title": "Sequential Construction (8, 16, 32 bits)",
+        "methods": ["FuseLge3Shards-seq", "Fuse3NoShards128"],
+        "series_bits": EVEN_BITS,
+        "labels": {"FuseLge3Shards-seq": "VFilter(Fuse+LGE)"},
+        "y_group": "sharding",
+        "column": "constr_ns",
+        "ylabel": "ns/key",
+    },
+    "sharding-odd": {
+        "title": "Sequential Construction (9, 17, 33 bits)",
+        "methods": ["FuseLge3Shards-seq", "Fuse3NoShards128"],
+        "series_bits": ODD_BITS,
+        "labels": {"FuseLge3Shards-seq": "VFilter(Fuse+LGE)"},
+        "y_group": "sharding",
+        "column": "constr_ns",
+        "ylabel": "ns/key",
+    },
     # --- Compressed static functions: all distributions on one plot ---
     # Bits-agnostic (auto-detected): comp-build.pdf, comp-query.pdf.
     "comp-build": {
         "title": "Compressed Function Construction",
+        # The lines leave no room for the legend: make room above them
+        "legend_loc": "upper left",
+        "legend_ncol": 2,
+        "ymax_factor": 1.5,
         "methods": [
             "CSF-Geo", "CSF-Zipf", "CSF-Uni256",
             "CompVFunc-Geo", "CompVFunc-Zipf", "CompVFunc-Uni256",
@@ -481,6 +521,7 @@ FIGURES = {
     },
     "comp-query": {
         "title": "Compressed Function Queries",
+        "legend_ncol": 2,
         "methods": [
             "CSF-Geo", "CSF-Zipf", "CSF-Uni256",
             "CompVFunc-Geo", "CompVFunc-Zipf", "CompVFunc-Uni256",

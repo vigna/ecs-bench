@@ -1738,11 +1738,15 @@ def cmd_plot(args):
     """Generate paper figures from benchmark results.
 
     Reads the same result files as 'report' and produces one PDF per
-    (figure, bits) combination in the output directory.
+    (figure, bits) combination in the output directory (one PDF per figure
+    for presets with "series_bits" and for bits-agnostic presets). The
+    style (e.g., TeX's fonts) is set by the matplotlibrc file in the
+    repository root, whatever the current directory.
     """
     try:
         import matplotlib
         matplotlib.use("Agg")
+        matplotlib.rc_file(os.path.join(REPO_ROOT, "matplotlibrc"))
         import matplotlib.pyplot as plt
     except ImportError:
         sys.exit("matplotlib is required for plotting: pip install matplotlib")
@@ -1759,104 +1763,128 @@ def cmd_plot(args):
         _plot_one(figure_name, args, plt)
 
 
-def _plot_one(figure_name, args, plt):
-    """Generate PDFs for a single figure preset."""
-    fig_cfg = FIGURES[figure_name]
-    bits_list = resolve_bits(args.bits)
-    markers = ["o", "s", "^", "v", "p", "*", "h", "D"]
-    col = fig_cfg["column"]
+# Values of the figures, keyed by (result dir, n, bits, column, tool), so
+# that each result file is parsed once.
+_figure_values = {}
 
-    all_agnostic = all(
+
+def _figure_value(rdir, n, bits, col, tool):
+    """The value of a column for a method, size and bit width, or None."""
+    key = (rdir, n, bits, col, tool)
+    if key not in _figure_values:
+        bench_err = rdir / f"bench.{n}.{bits}.err"
+        pq_err = rdir / f"parbench.{n}.{bits}.err"
+        val = None
+        if col == "constr_ns" and bench_err.exists():
+            val = parse_build(bench_err.read_text(), tool).get("constr_ns")
+        elif col.startswith("query_") and bench_err.exists():
+            val = parse_query(bench_err.read_text(), tool).get(col)
+        elif col == "parbench_med" and pq_err.exists():
+            val = parse_query(pq_err.read_text(), tool).get("query_median")
+        _figure_values[key] = val
+    return _figure_values[key]
+
+
+def _bits_agnostic(fig_cfg):
+    """Whether all methods of a figure preset are bits-agnostic."""
+    return all(
         METHODS[m].get("bits_agnostic", METHODS[m]["tool"] in BITS_AGNOSTIC_TOOLS)
         for m in fig_cfg["methods"] if m in METHODS
     )
-    if all_agnostic:
-        bits_list = [0]
 
-    global_ymax = 0.0
-    for bits in bits_list:
-        for method_name in fig_cfg["methods"]:
-            if method_name not in METHODS:
-                continue
-            cfg = METHODS[method_name]
-            rdir = Path(args.results_dir) / method_name
-            if not rdir.exists():
-                continue
-            max_log2 = effective_max_log2(args, cfg)
-            tool_for_parse = _parse_tool(cfg["tool"])
-            for log2_n in range(MIN_LOG2, max_log2 + 1):
+
+def _panel_bits(fig_cfg, bits_list):
+    """The bit widths of the plots of a figure preset: a single plot (None)
+    for presets with "series_bits", a single plot for bit width 0 for
+    bits-agnostic presets, and one plot per bit width otherwise."""
+    if "series_bits" in fig_cfg:
+        return [None]
+    if _bits_agnostic(fig_cfg):
+        return [0]
+    return bits_list
+
+
+def _figure_series(fig_cfg, bits, args):
+    """The series of a plot of a figure preset, as (method, position, label,
+    points) tuples, where position is the index of the bit width in
+    "series_bits" (None for presets without it), and points are (n, value)
+    pairs. Series without points are omitted."""
+    col = fig_cfg["column"]
+    series_bits = fig_cfg.get("series_bits")
+    result = []
+    for method_name in fig_cfg["methods"]:
+        cfg = METHODS.get(method_name)
+        if cfg is None:
+            continue
+        rdir = Path(args.results_dir) / method_name
+        if not rdir.exists():
+            continue
+        tool_for_parse = _parse_tool(cfg["tool"])
+        label = fig_cfg.get("labels", {}).get(method_name, cfg["label"])
+        widths = list(enumerate(series_bits)) if series_bits else [(None, bits)]
+        for pos, b in widths:
+            points = []
+            for log2_n in range(MIN_LOG2, effective_max_log2(args, cfg) + 1):
                 n = 1 << log2_n
-                bench_err = rdir / f"bench.{n}.{bits}.err"
-                pq_err = rdir / f"parbench.{n}.{bits}.err"
-                val = None
-                if col in ("constr_ns",) and bench_err.exists():
-                    val = parse_build(bench_err.read_text(), tool_for_parse).get("constr_ns")
-                elif col.startswith("query_") and bench_err.exists():
-                    val = parse_query(bench_err.read_text(), tool_for_parse).get(col)
-                elif col == "parbench_med" and pq_err.exists():
-                    val = parse_query(pq_err.read_text(), tool_for_parse).get("query_median")
-                if val is not None and val > global_ymax:
-                    global_ymax = val
-    global_ymax *= 1.15
-
-    for bits in bits_list:
-        plt.figure(figsize=(8, 5.5))
-        mi = 0
-
-        for method_name in fig_cfg["methods"]:
-            if method_name not in METHODS:
-                continue
-            cfg = METHODS[method_name]
-            rdir = Path(args.results_dir) / method_name
-            if not rdir.exists():
-                continue
-
-            xs, ys = [], []
-            max_log2 = effective_max_log2(args, cfg)
-            tool_for_parse = _parse_tool(cfg["tool"])
-
-            for log2_n in range(MIN_LOG2, max_log2 + 1):
-                n = 1 << log2_n
-                bench_err = rdir / f"bench.{n}.{bits}.err"
-                pq_err = rdir / f"parbench.{n}.{bits}.err"
-
-                val = None
-                if col in ("constr_ns",) and bench_err.exists():
-                    d = parse_build(bench_err.read_text(), tool_for_parse)
-                    val = d.get("constr_ns")
-                elif col.startswith("query_") and bench_err.exists():
-                    d = parse_query(bench_err.read_text(), tool_for_parse)
-                    val = d.get(col)
-                elif col == "parbench_med" and pq_err.exists():
-                    d = parse_query(pq_err.read_text(), tool_for_parse)
-                    val = d.get("query_median")
-
+                val = _figure_value(rdir, n, b, col, tool_for_parse)
                 if val is not None:
-                    xs.append(n)
-                    ys.append(val)
+                    points.append((n, val))
+            if points:
+                result.append((method_name, pos,
+                               label if pos is None else f"{label}, {b} bits",
+                               points))
+    return result
 
-            if xs:
-                plt.plot(xs, ys,
-                         marker=markers[mi % len(markers)],
-                         linestyle="-",
-                         label=cfg["label"])
-                mi += 1
+
+def _figure_ymax(figure_name, bits_list, args):
+    """The upper limit of the vertical axis of the plots of a figure preset:
+    the largest value of all plots of its "y_group", times its
+    "ymax_factor"."""
+    group = FIGURES[figure_name].get("y_group", figure_name)
+    ymax = 0.0
+    for name, fig_cfg in FIGURES.items():
+        if fig_cfg.get("y_group", name) != group:
+            continue
+        for bits in _panel_bits(fig_cfg, bits_list):
+            for *_, points in _figure_series(fig_cfg, bits, args):
+                ymax = max(ymax, max(v for _, v in points))
+    return FIGURES[figure_name].get("ymax_factor", 1.15) * ymax
+
+
+def _plot_one(figure_name, args, plt):
+    """Generate PDFs for a single figure preset."""
+    fig_cfg = FIGURES[figure_name]
+    markers = ["o", "s", "^", "v", "p", "*", "h", "D"]
+    bits_list = resolve_bits(args.bits)
+    global_ymax = _figure_ymax(figure_name, bits_list, args)
+
+    for bits in _panel_bits(fig_cfg, bits_list):
+        plt.figure(figsize=(8, 5.5))
+        series = _figure_series(fig_cfg, bits, args)
+        for mi, (_, _, label, points) in enumerate(series):
+            plt.plot([n for n, _ in points], [v for _, v in points],
+                     marker=markers[mi % len(markers)],
+                     linestyle="-",
+                     label=label)
 
         title = fig_cfg["title"].format(bits=bits) if "{bits}" in fig_cfg["title"] else fig_cfg["title"]
         plt.title(title)
         plt.xlabel("Number of keys")
         plt.ylabel(fig_cfg["ylabel"])
         plt.xscale("log")
-        if mi > 0:
-            plt.legend()
+        if series:
+            # By default, the location set by matplotlibrc
+            plt.legend(loc=fig_cfg.get("legend_loc"),
+                       ncol=fig_cfg.get("legend_ncol", 1))
         if global_ymax > 0:
             plt.ylim(0, global_ymax)
 
         out_dir = Path(args.output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-        suffix = "" if all_agnostic else f"-{bits}"
+        suffix = "" if bits in (None, 0) else f"-{bits}"
         out_path = out_dir / f"{figure_name}{suffix}.pdf"
-        plt.savefig(str(out_path), format="pdf")
+        # Without a creation date, unchanged figures are identical files
+        plt.savefig(str(out_path), format="pdf", metadata={"CreationDate": None})
         plt.close()
         print(f"  saved {out_path}")
 
@@ -1956,13 +1984,13 @@ TABLES = {
         "rows": [
             ("BuRR", {"constr_seq": "BuRR-seq", "constr_par": "BuRR",
                       "query_seq": "BuRR", "query_par": "BuRR"}),
-            ("VFunc", {"constr_seq": "FuseLge3Shards-seq", "constr_par": "FuseLge3Shards",
+            ("VFilter", {"constr_seq": "FuseLge3Shards-seq", "constr_par": "FuseLge3Shards",
                        "query_seq": "FuseLge3Shards", "query_par": "FuseLge3Shards"}),
             ("MWHC", {"constr_seq": None, "constr_par": "Mwhc3",
                       "query_seq": "Mwhc3", "query_par": "Mwhc3"}),
-            # The sharding ablation: VFunc's construction, laid out as HEM
+            # The sharding ablation: VFilter's construction, laid out as HEM
             # would lay it out. Everything but the offset/seed indirection is
-            # held fixed, so the gap against the VFunc row is that
+            # held fixed, so the gap against the VFilter row is that
             # indirection. Construction is single-threaded here (no lazy
             # Gaussian elimination, no parallel builder), so we report only
             # queries.
@@ -2023,95 +2051,113 @@ TABLES = {
 }
 
 
+def _filter_cells(method_name, bits_order, path_fn, value_fn, results_dir):
+    """Cells of one half (sequential or parallel) of a row; a half with no
+    method or no data at all is rendered as dashes."""
+    if method_name is None or METHODS.get(method_name) is None:
+        return " & ---" * len(bits_order)
+    cfg = METHODS[method_name]
+    rdir = Path(results_dir) / method_name
+    tool_for_parse = _parse_tool(cfg["tool"])
+    vals = []
+    for bits in bits_order:
+        err = rdir / path_fn(bits)
+        vals.append(value_fn(err.read_text(), tool_for_parse) if err.exists() else "")
+    if not any(vals):
+        return " & ---" * len(bits_order)
+    return "".join(f" & {v}" for v in vals)
+
+
 def _filter_constr_row(label, variants, bits_order, n, args):
-    """Build one construction row (sequential | parallel, integer ns/key)."""
+    """Build one construction row (sequential | parallel, integer ns/key);
+    returns None if the row has no construction data at all."""
+    if variants["constr_seq"] is None and variants["constr_par"] is None:
+        return None
+
+    def value(text, tool):
+        v = parse_build(text, tool).get("constr_ns")
+        return "" if v is None else f"{v:.0f}"
+
     row = label
     for mode in ("constr_seq", "constr_par"):
-        method_name = variants[mode]
-        if method_name is None:
-            row += " & ---" * len(bits_order)
-            continue
-        cfg = METHODS.get(method_name)
-        if cfg is None:
-            row += " &" * len(bits_order)
-            continue
-        rdir = Path(args.results_dir) / method_name
-        tool_for_parse = _parse_tool(cfg["tool"])
-        for bits in bits_order:
-            bench_err = rdir / f"bench.{n}.{bits}.err"
-            val = ""
-            if bench_err.exists():
-                d = parse_build(bench_err.read_text(), tool_for_parse)
-                v = d.get("constr_ns")
-                if v is not None:
-                    val = f"{v:.0f}"
-            row += f" & {val}"
+        row += _filter_cells(variants[mode], bits_order,
+                             lambda bits: f"bench.{n}.{bits}.err", value,
+                             args.results_dir)
     return row + r" \\"
 
 
 def _filter_query_row(label, variants, bits_order, n, args):
-    """Build one query row (sequential from bench.err, parallel from parbench.err)."""
+    """Build one query row (sequential from bench.err, parallel from
+    parbench.err)."""
     row = label
     for mode in ("query_seq", "query_par"):
-        method_name = variants[mode]
-        if method_name is None:
-            row += " & ---" * len(bits_order)
-            continue
-        cfg = METHODS.get(method_name)
-        if cfg is None:
-            row += " &" * len(bits_order)
-            continue
-        rdir = Path(args.results_dir) / method_name
-        tool_for_parse = _parse_tool(cfg["tool"])
         is_par = mode == "query_par"
         prefix = "parbench" if is_par else "bench"
         # parbench files summarize per-instance medians (no real Min);
         # bench files have honest 5-repeat stats.  Use the meaningful
         # column in each case.
         col = "query_median" if is_par else "query_min"
-        for bits in bits_order:
-            bench_err = rdir / f"{prefix}.{n}.{bits}.err"
-            val = ""
-            if bench_err.exists():
-                d = parse_query(bench_err.read_text(), tool_for_parse)
-                v = d.get(col)
-                if v is not None:
-                    val = f"{v:.1f}"
-            row += f" & {val}"
+
+        def value(text, tool, col=col):
+            v = parse_query(text, tool).get(col)
+            return "" if v is None else f"{v:.1f}"
+
+        row += _filter_cells(variants[mode], bits_order,
+                             lambda bits, prefix=prefix: f"{prefix}.{n}.{bits}.err",
+                             value, args.results_dir)
     return row + r" \\"
 
 
 def _table_filter(tbl, args):
-    """Render filter tables: one construction table and one query table per size."""
+    """Render the filter table: a single tabular with a construction block and
+    a query block per size, so that all blocks share the same columns."""
     bits_order = tbl["bits_order"]
     ncols = len(bits_order)
-    colspec = "l" + "rrr|rrr" + "||" + "rrr|rrr"
+    half = ncols // 2
+    # Narrow gaps between the two groups of widths, a wide gap between the
+    # sequential and parallel halves; @{} replaces the column separation, so
+    # these are the actual gaps.
+    group = "r" * half + r"@{\hspace{10pt}}" + "r" * half
+    colspec = "l" + group + r"@{\hspace{18pt}}" + group
+    print(r"\begin{tabular}{" + colspec + "}")
+    print(r"\toprule")
+    print(f"& \\multicolumn{{{ncols}}}{{c}}{{Sequential}}"
+          f" & \\multicolumn{{{ncols}}}{{c}}{{Parallel}} \\\\")
+    print(f"\\cmidrule(lr){{2-{ncols + 1}}}\\cmidrule(lr){{{ncols + 2}-{2 * ncols + 1}}}")
+    print("".join(f" & {bits}" for bits in bits_order) * 2 + r" \\")
 
     for n in tbl["sizes"]:
         log2_n = n.bit_length() - 1
-
         for kind, row_fn in (("Construction", _filter_constr_row),
                              ("Queries", _filter_query_row)):
-            print(f"% {kind}, n = 2^{{{log2_n}}}")
-            print(r"\begin{tabular}{" + colspec + "}")
-            print(r"\toprule")
-
-            print(f"& \\multicolumn{{{ncols}}}{{c}}{{Sequential}}"
-                  f" & \\multicolumn{{{ncols}}}{{c}}{{Parallel}} \\\\")
-
-            hdr = ""
-            for bits in bits_order:
-                hdr += f" & {bits}"
-            hdr += hdr
-            print(hdr + r" \\")
             print(r"\midrule")
-
+            print(f"\\multicolumn{{{2 * ncols + 1}}}{{l}}"
+                  f"{{\\emph{{{kind}, $n=2^{{{log2_n}}}$}}}} \\\\")
             for label, variants in tbl["rows"]:
-                print(row_fn(label, variants, bits_order, n, args))
+                row = row_fn(label, variants, bits_order, n, args)
+                if row is not None:
+                    print(row)
 
-            print(r"\bottomrule")
-            print(r"\end{tabular}")
-            print()
+    print(r"\bottomrule")
+    print(r"\end{tabular}")
+
+
+# The gap between groups of columns of a table, which replaces vertical
+# rules (the groups are marked by rules under their headers).
+GROUP_GAP = r"@{\hspace{18pt}}"
+
+
+def _group_colspec(ngroups, width):
+    """Column specification of a label column followed by groups of columns
+    separated by gaps."""
+    return "l" + GROUP_GAP.join(["r" * width] * ngroups)
+
+
+def _group_rules(ngroups, width):
+    """Rules under the headers of groups of columns following a label
+    column."""
+    return "".join(f"\\cmidrule(lr){{{2 + i * width}-{1 + (i + 1) * width}}}"
+                   for i in range(ngroups))
 
 
 def _table_mmphf(tbl, args):
@@ -2120,8 +2166,7 @@ def _table_mmphf(tbl, args):
     nsizes = len(sizes)
     cols_per_size = 3  # construction, bits/key, query
 
-    # Column spec: label + 3 columns per size, separated by ||
-    colspec = "l" + "||".join(["rrr"] * nsizes)
+    colspec = _group_colspec(nsizes, cols_per_size)
     print(r"\begin{tabular}{" + colspec + "}")
     print(r"\toprule")
 
@@ -2131,6 +2176,7 @@ def _table_mmphf(tbl, args):
         log2_n = n.bit_length() - 1
         hdr1 += f" & \\multicolumn{{{cols_per_size}}}{{c}}{{$n = 2^{{{log2_n}}}$}}"
     print(hdr1 + r" \\")
+    print(_group_rules(nsizes, cols_per_size))
 
     # Header row 2: sub-column labels
     sub_hdr = " & Constr. & Bits/key & Query" * nsizes
@@ -2207,7 +2253,7 @@ def _table_mmphf_str(tbl, args):
     ndatasets = len(datasets)
     cols_per_dataset = 3  # construction, bits/key, query
 
-    colspec = "l" + "||".join(["rrr"] * ndatasets)
+    colspec = _group_colspec(ndatasets, cols_per_dataset)
     print(r"\begin{tabular}{" + colspec + "}")
     print(r"\toprule")
 
@@ -2216,6 +2262,7 @@ def _table_mmphf_str(tbl, args):
         safe = d.replace("_", r"\_")
         hdr1 += f" & \\multicolumn{{{cols_per_dataset}}}{{c}}{{\\texttt{{{safe}}}}}"
     print(hdr1 + r" \\")
+    print(_group_rules(ndatasets, cols_per_dataset))
 
     sub_hdr = " & Constr. & b/key & Query" * ndatasets
     print(sub_hdr + r" \\")
@@ -2266,19 +2313,21 @@ def _table_comp(tbl, args):
     dist_labels = tbl["dist_labels"]
     ndists = len(dist_labels)
 
-    for n in tbl["sizes"]:
+    for i, n in enumerate(tbl["sizes"]):
         log2_n = n.bit_length() - 1
+        if i > 0:
+            print()
+            print(r"\bigskip")
+            print()
 
-        colspec = "l" + "||rrr" * ndists
+        colspec = _group_colspec(ndists, 3)
         print(f"% n = 2^{{{log2_n}}}")
         print(r"\begin{tabular}{" + colspec + "}")
         print(r"\toprule")
 
-        hdr1 = ""
-        for i, dl in enumerate(dist_labels):
-            sep = "||" if i < ndists - 1 else ""
-            hdr1 += f" & \\multicolumn{{3}}{{c{sep}}}{{{dl}}}"
+        hdr1 = "".join(f" & \\multicolumn{{3}}{{c}}{{{dl}}}" for dl in dist_labels)
         print(hdr1 + r" \\")
+        print(_group_rules(ndists, 3))
 
         sub_hdr = (" & Constr. & Query & b/key") * ndists
         print(sub_hdr + r" \\")
@@ -2320,7 +2369,6 @@ def _table_comp(tbl, args):
 
         print(r"\bottomrule")
         print(r"\end{tabular}")
-        print()
 
 
 def _table_java(tbl, args):
@@ -2331,10 +2379,14 @@ def _table_java(tbl, args):
     ncols = len(bits_order)
     n_even = len(even)
     n_odd = len(odd)
-    colspec = "l" + "r" * n_even + "|" + "r" * n_odd + "r"
+    colspec = "l" + "r" * n_even + r"@{\hspace{10pt}}" + "r" * n_odd + GROUP_GAP + "r"
 
-    for n in tbl["sizes"]:
+    for i, n in enumerate(tbl["sizes"]):
         log2_n = n.bit_length() - 1
+        if i > 0:
+            print()
+            print(r"\bigskip")
+            print()
 
         print(f"% Java comparison, n = 2^{{{log2_n}}}")
         print(r"\begin{tabular}{" + colspec + "}")
@@ -2342,6 +2394,7 @@ def _table_java(tbl, args):
 
         print(f"& \\multicolumn{{{ncols}}}{{c}}{{Query (ns/key)}}"
               r" & {Overhead} \\")
+        print(f"\\cmidrule(lr){{2-{ncols + 1}}}")
 
         hdr = ""
         for bits in bits_order:
@@ -2386,7 +2439,6 @@ def _table_java(tbl, args):
 
         print(r"\bottomrule")
         print(r"\end{tabular}")
-        print()
 
 
 def _table_java_comp(tbl, args):
@@ -2394,19 +2446,21 @@ def _table_java_comp(tbl, args):
     dist_labels = tbl["dist_labels"]
     ndists = len(dist_labels)
 
-    for n in tbl["sizes"]:
+    for i, n in enumerate(tbl["sizes"]):
         log2_n = n.bit_length() - 1
+        if i > 0:
+            print()
+            print(r"\bigskip")
+            print()
 
-        colspec = "l" + "||rrr" * ndists
+        colspec = _group_colspec(ndists, 3)
         print(f"% Java compressed comparison, n = 2^{{{log2_n}}}")
         print(r"\begin{tabular}{" + colspec + "}")
         print(r"\toprule")
 
-        hdr1 = ""
-        for i, dl in enumerate(dist_labels):
-            sep = "||" if i < ndists - 1 else ""
-            hdr1 += f" & \\multicolumn{{3}}{{c{sep}}}{{{dl}}}"
+        hdr1 = "".join(f" & \\multicolumn{{3}}{{c}}{{{dl}}}" for dl in dist_labels)
         print(hdr1 + r" \\")
+        print(_group_rules(ndists, 3))
 
         sub_hdr = (" & Query & b/key & Ovhd\\%") * ndists
         print(sub_hdr + r" \\")
@@ -2448,7 +2502,6 @@ def _table_java_comp(tbl, args):
 
         print(r"\bottomrule")
         print(r"\end{tabular}")
-        print()
 
 
 def cmd_table(args):
