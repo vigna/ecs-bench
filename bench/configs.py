@@ -437,6 +437,12 @@ METHODS = {
 #   "labels":      labels replacing those of METHODS;
 #   "y_group":     presets with the same group share the range of the
 #                  vertical axis (by default, each preset is its own group);
+#   "style_group": presets with the same group draw each method with the
+#                  same color and marker, given by its position in the
+#                  list of all methods of the group, in order of first
+#                  appearance (by default, each preset is its own group);
+#                  presets of a group with "series_bits" must have the same
+#                  number of bit widths;
 #   "legend_loc":  location of the legend (by default, the one set by
 #                  matplotlibrc, that is, the best one for each plot);
 #   "legend_ncol": number of columns of the legend (by default, one);
@@ -448,6 +454,7 @@ FIGURES = {
     # One PDF per bit width: filter-build-8.pdf, filter-query-32.pdf, etc.
     "filter-build": {
         "title": "Filter Construction ({bits} bits)",
+        "style_group": "filter",
         "legend_loc": "upper left",
         "methods": [
             "Fuse3NoShards64",
@@ -463,6 +470,7 @@ FIGURES = {
     },
     "filter-query": {
         "title": "Filter Queries ({bits} bits)",
+        "style_group": "filter",
         "legend_loc": "upper left",
         "methods": [
             "Fuse3NoShards64",
@@ -477,6 +485,7 @@ FIGURES = {
     },
     "filter-parquery": {
         "title": "Filter Parallel Queries ({bits} bits)",
+        "style_group": "filter",
         "legend_loc": "upper left",
         "methods": [
             "Fuse3NoShards64",
@@ -494,6 +503,7 @@ FIGURES = {
     # width: sharding-even.pdf, sharding-odd.pdf.
     "sharding-even": {
         "title": "Sequential Construction (8, 16, 32 bits)",
+        "style_group": "sharding",
         "methods": ["FuseLge3Shards-seq", "Fuse3NoShards128"],
         "series_bits": EVEN_BITS,
         "labels": {"FuseLge3Shards-seq": "VFilter(Fuse+LGE)"},
@@ -503,6 +513,7 @@ FIGURES = {
     },
     "sharding-odd": {
         "title": "Sequential Construction (9, 17, 33 bits)",
+        "style_group": "sharding",
         "methods": ["FuseLge3Shards-seq", "Fuse3NoShards128"],
         "series_bits": ODD_BITS,
         "labels": {"FuseLge3Shards-seq": "VFilter(Fuse+LGE)"},
@@ -514,6 +525,7 @@ FIGURES = {
     # Bits-agnostic (auto-detected): comp-build.pdf, comp-query.pdf.
     "comp-build": {
         "title": "Compressed Function Construction",
+        "style_group": "comp",
         # The lines leave no room for the legend: make room above them
         "legend_loc": "upper left",
         "legend_ncol": 2,
@@ -527,6 +539,7 @@ FIGURES = {
     },
     "comp-query": {
         "title": "Compressed Function Queries",
+        "style_group": "comp",
         "legend_ncol": 2,
         "methods": [
             "CSF-Geo", "CSF-Zipf", "CSF-Uni256",
@@ -539,12 +552,14 @@ FIGURES = {
     # Bits-agnostic: phast-build.pdf, phast-query.pdf.
     "phast-build": {
         "title": "PHastR vs VFunc Construction",
+        "style_group": "phast",
         "methods": ["PHastR", "VFunc"],
         "column": "constr_ns",
         "ylabel": "ns/key",
     },
     "phast-query": {
         "title": "PHastR vs VFunc Queries",
+        "style_group": "phast",
         "methods": ["PHastR", "VFunc"],
         "column": "query_min",
         "ylabel": "ns/key",
@@ -553,12 +568,14 @@ FIGURES = {
     # Bits-agnostic: mmphf-build.pdf, mmphf-query.pdf.
     "mmphf-build": {
         "title": "Monotone MMPHF Construction",
+        "style_group": "mmphf",
         "methods": ["LcpMmphfInt", "Lcp2MmphfInt", "LeMonHashInt"],
         "column": "constr_ns",
         "ylabel": "ns/key",
     },
     "mmphf-query": {
         "title": "Monotone MMPHF Queries",
+        "style_group": "mmphf",
         "methods": ["LcpMmphfInt", "Lcp2MmphfInt", "LeMonHashInt"],
         "column": "query_min",
         "ylabel": "ns/key",

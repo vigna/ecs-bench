@@ -1854,19 +1854,42 @@ def _figure_ymax(figure_name, bits_list, args):
     return FIGURES[figure_name].get("ymax_factor", 1.15) * ymax
 
 
+def _figure_styles(figure_name):
+    """The style indices of the methods of a figure preset: the position of
+    each method in the list of the methods of all presets of its
+    "style_group", in order of first appearance. A method has thus the same
+    color and marker in all plots of the group, whatever the other methods
+    of each plot, and whether or not they have points."""
+    group = FIGURES[figure_name].get("style_group", figure_name)
+    methods = []
+    for name, fig_cfg in FIGURES.items():
+        if fig_cfg.get("style_group", name) != group:
+            continue
+        for method_name in fig_cfg["methods"]:
+            if method_name not in methods:
+                methods.append(method_name)
+    return {method_name: i for i, method_name in enumerate(methods)}
+
+
 def _plot_one(figure_name, args, plt):
     """Generate PDFs for a single figure preset."""
     fig_cfg = FIGURES[figure_name]
     markers = ["o", "s", "^", "v", "p", "*", "h", "D"]
     bits_list = resolve_bits(args.bits)
     global_ymax = _figure_ymax(figure_name, bits_list, args)
+    styles = _figure_styles(figure_name)
+    # With "series_bits", each method has a style for each bit width
+    widths = len(fig_cfg.get("series_bits", [None]))
 
     for bits in _panel_bits(fig_cfg, bits_list):
         plt.figure(figsize=(8, 5.5))
         series = _figure_series(fig_cfg, bits, args)
-        for mi, (_, _, label, points) in enumerate(series):
+        for method_name, pos, label, points in series:
+            si = styles[method_name] * widths + (pos or 0)
+            # "Cn" is the n-th color of the color cycle (modulo its length)
             plt.plot([n for n, _ in points], [v for _, v in points],
-                     marker=markers[mi % len(markers)],
+                     color=f"C{si}",
+                     marker=markers[si % len(markers)],
                      linestyle="-",
                      label=label)
 
