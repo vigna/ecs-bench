@@ -105,9 +105,11 @@ def _parse_tool(tool):
     return _PARSE_TOOL_MAP.get(tool, tool)
 
 
-def effective_max_log2(args, cfg):
-    """Cap on log2(n) for a method: the config's max_log2, optionally
-    tightened by --max-log2 if the user passed it. No implicit fallback.
+def effective_max_log2(args, cfg, bits=None):
+    """Cap on log2(n) for a method and bit width: the config's max_log2,
+    optionally tightened by the entry for the bit width in the config's
+    max_log2_by_bits and by --max-log2 if the user passed it. No implicit
+    fallback.
 
     Methods that enumerate an explicit ``sizes`` list (e.g. the Sux4J/Java
     methods) instead of a ``max_log2`` derive their cap from the largest
@@ -117,6 +119,8 @@ def effective_max_log2(args, cfg):
         cap = cfg["max_log2"]
     else:
         cap = max(cfg["sizes"]).bit_length() - 1
+    if bits in cfg.get("max_log2_by_bits", {}):
+        cap = min(cap, cfg["max_log2_by_bits"][bits])
     if args.max_log2 is not None:
         cap = min(cap, args.max_log2)
     return cap
@@ -884,12 +888,12 @@ def cmd_bench(args):
             print(f"Skipping {method_name} (Java/Sux4J not available)")
             continue
 
-        max_log2 = effective_max_log2(args, cfg)
         bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in BITS_AGNOSTIC_TOOLS)
         method_bits = [0] if bits_agnostic else bits_list
 
         explicit_sizes = cfg.get("sizes")
         for bits in method_bits:
+            max_log2 = effective_max_log2(args, cfg, bits)
             if explicit_sizes is not None:
                 for n in explicit_sizes:
                     # --max-log2 must tighten an explicit size list too, or a
@@ -1460,9 +1464,8 @@ def cmd_par_bench(args):
         if cfg.get("bits_agnostic"):
             continue
 
-        max_log2 = effective_max_log2(args, cfg)
-
         for bits in bits_list:
+            max_log2 = effective_max_log2(args, cfg, bits)
             max_n = par_query_limit(bits, args.jobs)
             for log2_n in range(MIN_LOG2, max_log2 + 1):
                 n = 1 << log2_n
@@ -1662,7 +1665,6 @@ def cmd_report(args):
             continue
 
         # Standard size-based methods.
-        max_log2 = effective_max_log2(args, cfg)
         bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in BITS_AGNOSTIC_TOOLS)
         method_bits = [0] if bits_agnostic else bits_list
 
@@ -1673,6 +1675,7 @@ def cmd_report(args):
             if explicit_sizes is not None:
                 sizes = explicit_sizes
             else:
+                max_log2 = effective_max_log2(args, cfg, bits)
                 sizes = [1 << log2 for log2 in range(MIN_LOG2, max_log2 + 1)]
             for n in sizes:
                 bench_err = rdir / f"bench.{n}.{bits}.err"
@@ -1824,7 +1827,7 @@ def _figure_series(fig_cfg, bits, args):
         widths = list(enumerate(series_bits)) if series_bits else [(None, bits)]
         for pos, b in widths:
             points = []
-            for log2_n in range(MIN_LOG2, effective_max_log2(args, cfg) + 1):
+            for log2_n in range(MIN_LOG2, effective_max_log2(args, cfg, b) + 1):
                 n = 1 << log2_n
                 val = _figure_value(rdir, n, b, col, tool_for_parse)
                 if val is not None:
@@ -1915,8 +1918,6 @@ def cmd_status(args):
             print(f"{method_name:24s}  bench {done}/{total}")
             continue
 
-        max_log2 = effective_max_log2(args, cfg)
-
         done_bench, done_pq = 0, 0
         total = 0
         bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in BITS_AGNOSTIC_TOOLS)
@@ -1927,6 +1928,7 @@ def cmd_status(args):
             if explicit_sizes is not None:
                 sizes = explicit_sizes
             else:
+                max_log2 = effective_max_log2(args, cfg, bits)
                 sizes = [1 << log2 for log2 in range(MIN_LOG2, max_log2 + 1)]
             for n in sizes:
                 total += 1
@@ -2264,7 +2266,7 @@ def _table_mmphf_str(tbl, args):
     print(hdr1 + r" \\")
     print(_group_rules(ndatasets, cols_per_dataset))
 
-    sub_hdr = " & Constr. & b/key & Query" * ndatasets
+    sub_hdr = " & Constr. & Bits/key & Query" * ndatasets
     print(sub_hdr + r" \\")
     print(r"\midrule")
 
@@ -2329,7 +2331,7 @@ def _table_comp(tbl, args):
         print(hdr1 + r" \\")
         print(_group_rules(ndists, 3))
 
-        sub_hdr = (" & Constr. & Query & b/key") * ndists
+        sub_hdr = (" & Constr. & Bits/key & Query") * ndists
         print(sub_hdr + r" \\")
         print(r"\midrule")
 
@@ -2362,7 +2364,7 @@ def _table_comp(tbl, args):
                     if bpk is not None:
                         bpk_val = f"{bpk:.2f}"
 
-                row += f" & {constr_val} & {query_val} & {bpk_val}"
+                row += f" & {constr_val} & {bpk_val} & {query_val}"
 
             row += r" \\"
             print(row)
@@ -2462,7 +2464,7 @@ def _table_java_comp(tbl, args):
         print(hdr1 + r" \\")
         print(_group_rules(ndists, 3))
 
-        sub_hdr = (" & Query & b/key & Ovhd\\%") * ndists
+        sub_hdr = (" & Bits/key & Ovhd\\% & Query") * ndists
         print(sub_hdr + r" \\")
         print(r"\midrule")
 
@@ -2495,7 +2497,7 @@ def _table_java_comp(tbl, args):
                         if entropy is not None:
                             ovhd_val = f"{compute_overhead(bpk, entropy):.1f}"
 
-                row += f" & {query_val} & {bpk_val} & {ovhd_val}"
+                row += f" & {bpk_val} & {ovhd_val} & {query_val}"
 
             row += r" \\"
             print(row)

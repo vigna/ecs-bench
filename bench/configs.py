@@ -101,6 +101,9 @@ METHODS = {
         "bench_bin": "bench_vfilter",
         "build_threads": None,
         "max_log2": 33,
+        # Even with --low-mem, 2^33 keys with 32- or 33-bit values exceed
+        # RAM on a 384 GiB machine.
+        "max_log2_by_bits": {32: 32, 33: 32},
         # For n ≥ 2^32 the high-memory peeling algorithm exceeds RAM;
         # --low-mem switches to a slower but leaner variant.
         "low_mem_threshold": 32,
@@ -156,7 +159,7 @@ METHODS = {
     # Query:  bench_hem_vfilter <query_keys> <outfile>
     # The builder keeps all signatures in core (VFilter streams them through a
     # disk-backed store), so it needs about 32 bytes per key while sharding.
-    # That fits 2^32 keys on a 384 GiB machine, and no more.
+    # That fits 2^33 keys on a 384 GiB machine.
     #
     # This method appears in the query figures and in the filter table, but not
     # in the construction figures: it has no lazy Gaussian elimination and a
@@ -192,7 +195,7 @@ METHODS = {
     },
     "BuRR-seq": {
         "tool": "burr",
-        "label": "BuRR (seq)",
+        "label": "BuRR(seq)",
         "burr_binary": "bench",
         "burr_flags": ["-L", "64", "-2", "-I"],
         "burr_threads": 1,
@@ -221,7 +224,9 @@ METHODS = {
         "label": "BuRR-CSF(zipf)",
         "distribution": ["--zipf", "2000"],
         "coder": "huffman",
-        "max_log2": 31,
+        # 2^31 keys exceed RAM on a 384 GiB machine (with the geometric
+        # distribution they do not).
+        "max_log2": 30,
         "query_keys": 20_000_000,
     },
     "CSF-Uni256": {
@@ -229,7 +234,8 @@ METHODS = {
         "label": "BuRR-CSF(uni256)",
         "distribution": ["--uniform", "256"],
         "coder": "huffman",
-        "max_log2": 31,
+        # 2^31 keys exceed RAM on a 384 GiB machine.
+        "max_log2": 30,
         "query_keys": 20_000_000,
     },
     # -----------------------------------------------------------------
