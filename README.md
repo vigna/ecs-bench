@@ -182,7 +182,8 @@ The crate does not implement augmented peeling, which `VFilter` uses up to
 segment-size law of plain peeling, so its graphs are 1.8–4.2% larger between
 2²⁰ and 2²⁴ keys, and it refuses fewer than a million keys. It also keeps all
 signatures in core, where `VFilter` streams them through a disk-backed store,
-so it stops at 2³² keys. It also remixes the local seed with one multiplication,
+so it needs about 32 bytes per key while sharding: 2³³ keys still fit on a
+384 GiB machine. Finally, it remixes the local seed with one multiplication,
 where Sux4J re-hashes the whole signature. The measured gap is therefore a
 lower bound. `hem-vfilter/src/lib.rs` explains these points, and why a cheaper
 remix fails.
