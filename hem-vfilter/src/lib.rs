@@ -10,8 +10,8 @@
 //! - the same shard selection (the high bits of the first signature word);
 //! - the same fuse 3-hypergraph edge generation, bit for bit (see
 //!   [`local_edge`], which mirrors `edge_64` of `sux::func::shard_edge`);
-//! - the same expansion factor ([`Fuse3NoShards::c`]) and the same segment-size
-//!   law ([`Fuse3Shards::log2_seg_size`]);
+//! - beyond 2·10⁷ keys, the same expansion factor ([`Fuse3NoShards::c`]) and
+//!   the same segment-size law ([`Fuse3Shards::log2_seg_size`]);
 //! - the same value backends (a slice of `u8`/`u16`/`u32` for power-of-two
 //!   widths, an unaligned bit-packed array otherwise);
 //! - by default, the same number of shards that `VFilter` would choose for the
@@ -32,10 +32,15 @@
 //!
 //! # What is *not* identical
 //!
-//! - Lazy Gaussian elimination is not implemented: a shard that fails to peel
-//!   is retried with a different local seed. This affects only key sets below
-//!   `VFilter`'s linear-solving threshold (800 000 keys), which this crate
-//!   refuses to build.
+//! - Augmented peeling is not implemented: a shard that fails to peel is
+//!   retried with a different local seed. Up to 2·10⁷ keys `VFilter` solves
+//!   its shards by augmented peeling, which works below the peeling threshold;
+//!   there, we peel the same shards with the expansion factor and the
+//!   segment-size law above, so our graphs are larger (by 1.8–4.2% between 2²⁰
+//!   and 2²⁴ keys) and may have larger segments. A query performs the same
+//!   operations on either graph, so the comparison still isolates the layout.
+//!   The difference grows as the key set shrinks, and this crate refuses to
+//!   build fewer than a million keys.
 //! - The local seed remixes the local signature by multiplying it by an odd
 //!   multiplier derived from the seed. Sux4J instead re-runs SpookyHash on the
 //!   whole signature, which is far more expensive, so the query cost measured
@@ -72,7 +77,7 @@
 use anyhow::{Result, bail, ensure};
 use rayon::prelude::*;
 use std::io::{Read, Write};
-use sux::func::shard_edge::{Fuse3NoShards, Fuse3Shards, FuseLge3Shards, ShardEdge};
+use sux::func::shard_edge::{Fuse3NoShards, Fuse3Shards, FuseAug3Shards, ShardEdge};
 use sux::utils::ToSig;
 
 /// Bits of the offset word reserved for the vertex offset. The remaining bits
@@ -84,8 +89,9 @@ const OFFSET_MASK: u64 = (1u64 << OFFSET_BITS) - 1;
 /// The seed is stored in the 64 − [`OFFSET_BITS`] bits above the offset.
 const MAX_LOCAL_SEEDS: u64 = 1 << 12;
 
-/// `VFilter` never creates shards below this size, and neither do we; below it
-/// `VFilter` switches to lazy Gaussian elimination, which we do not implement.
+/// The smallest key set we build. Below 2·10⁷ keys `VFilter` solves its shards
+/// by augmented peeling, which we do not implement, and the difference between
+/// its expansion factor and ours grows as the key set shrinks.
 const MIN_KEYS: usize = 1_000_000;
 
 /// The finalization step of Austin Appleby's MurmurHash3, as in
@@ -349,7 +355,7 @@ pub struct HemVFilter<V: Values> {
     /// The seed of the key-to-signature hash.
     seed: u64,
     /// Shards are selected as `sig[0] >> shard_bits_shift >> 1`, exactly as in
-    /// `FuseLge3Shards::shard`.
+    /// `FuseAug3Shards::shard`.
     shard_bits_shift: u32,
     /// The (global) base-2 logarithm of the segment size.
     log2_seg_size: u32,
@@ -442,7 +448,7 @@ impl<V: Values> HemVFilter<V> {
 /// Returns the number of high bits `VFilter` would use to shard `n` keys with
 /// the given ε, by asking `VFilter`'s own sharding logic.
 pub fn vfilter_shard_high_bits(n: usize, eps: f64) -> u32 {
-    let mut shard_edge = FuseLge3Shards::default();
+    let mut shard_edge = FuseAug3Shards::default();
     shard_edge.set_up_shards(n, eps, Fuse3Shards::DUP_EDGE_RETRY_PROB);
     shard_edge.shard_high_bits()
 }
@@ -556,8 +562,8 @@ pub fn build<V: Values>(
 ) -> Result<HemVFilter<V>> {
     ensure!(
         n >= MIN_KEYS,
-        "this crate does not implement lazy Gaussian elimination, so it cannot \
-         build fewer than {MIN_KEYS} keys"
+        "this crate does not implement augmented peeling, so it does not build \
+         fewer than {MIN_KEYS} keys"
     );
 
     let shard_high_bits = shard_high_bits.unwrap_or_else(|| vfilter_shard_high_bits(n, eps));
@@ -599,7 +605,8 @@ pub fn build<V: Values>(
     let max_shard = *sizes.iter().max().unwrap();
     ensure!(sizes.iter().all(|&m| m > 0), "an empty shard was generated");
 
-    // The segment-size law and the expansion factor are VFilter's own.
+    // The segment-size law and the expansion factor are those VFilter uses
+    // when it peels, that is, beyond 2·10⁷ keys.
     let log2_seg_size = Fuse3Shards::log2_seg_size(max_shard);
     let seg_size = 1usize << log2_seg_size;
 

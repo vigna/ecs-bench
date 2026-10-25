@@ -11,18 +11,18 @@ without losing partial progress.
 Usage examples:
 
     # Smoke test: one method, 8 bits, small sizes
-    python bench/run.py bench --method FuseLge3Shards --bits 8 --max-log2 22
+    python bench/run.py bench --method FuseAug3Shards --bits 8 --max-log2 22
 
     # Full run with CPU pinning
     python bench/run.py bench --method all --bits all \\
         --pin "chrt -f 99 taskset -c 2"
 
     # Report to stdout
-    python bench/run.py report --method FuseLge3Shards --bits 8
+    python bench/run.py report --method FuseAug3Shards --bits 8
 
     # Parallel query benchmark (N instances via GNU parallel; defaults
     # to min(32, cpu_count()), override with --jobs)
-    python bench/run.py par-bench --method FuseLge3Shards --bits 8 \\
+    python bench/run.py par-bench --method FuseAug3Shards --bits 8 \\
         --max-log2 30
 
     # Generate paper figures
@@ -530,7 +530,7 @@ def sux_build_cmd(cfg, n, bits, outfile, args):
     """Assemble the vfilter build command line.
 
     Example (odd bits):
-        vfilter -n 1048576 --shard-edge fuse-lge3-shards --bits 9
+        vfilter -n 1048576 --shard-edge fuse-aug3-shards --bits 9
                 --unaligned --threads 32 output.bin
 
     --unaligned is only valid for non-power-of-2 bit widths (9, 17, 33).
@@ -569,7 +569,7 @@ def sux_query_cmd(cfg, n, bits, infile, args):
     """Assemble the bench_vfilter query command line.
 
     Example (odd bits):
-        bench_vfilter 100000000 output.bin --shard-edge fuse-lge3-shards
+        bench_vfilter 100000000 output.bin --shard-edge fuse-aug3-shards
                       --bits 9 --unaligned
     """
     target = sux_target_dir(args.sux_dir)
@@ -2009,16 +2009,15 @@ TABLES = {
         "rows": [
             ("BuRR", {"constr_seq": "BuRR-seq", "constr_par": "BuRR",
                       "query_seq": "BuRR", "query_par": "BuRR"}),
-            ("VFilter", {"constr_seq": "FuseLge3Shards-seq", "constr_par": "FuseLge3Shards",
-                       "query_seq": "FuseLge3Shards", "query_par": "FuseLge3Shards"}),
+            ("VFilter", {"constr_seq": "FuseAug3Shards-seq", "constr_par": "FuseAug3Shards",
+                       "query_seq": "FuseAug3Shards", "query_par": "FuseAug3Shards"}),
             ("MWHC", {"constr_seq": None, "constr_par": "Mwhc3",
                       "query_seq": "Mwhc3", "query_par": "Mwhc3"}),
             # The sharding ablation: VFilter's construction, laid out as HEM
             # would lay it out. Everything but the offset/seed indirection is
             # held fixed, so the gap against the VFilter row is that
-            # indirection. Construction is single-threaded here (no lazy
-            # Gaussian elimination, no parallel builder), so we report only
-            # queries.
+            # indirection. Construction is single-threaded here (no augmented
+            # peeling, no parallel builder), so we report only queries.
             ("HEM(Fuse)", {"constr_seq": None, "constr_par": None,
                            "query_seq": "HemVFilter", "query_par": "HemVFilter"}),
             # HEM as actually shipped: Sux4J's GOV3, queried by the C code
@@ -2059,7 +2058,7 @@ TABLES = {
     },
     "java": {
         "rows": [
-            ("VFilter", {"query": "FuseLge3Shards"}),
+            ("VFilter", {"query": "FuseAug3Shards"}),
             ("GOV3", {"query": "GOV3Function"}),
         ],
         "bits_order": [8, 16, 32, 9, 17, 33],

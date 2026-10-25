@@ -108,23 +108,23 @@ METHODS = {
         # --low-mem switches to a slower but leaner variant.
         "low_mem_threshold": 32,
     },
-    "FuseLge3Shards": {
+    "FuseAug3Shards": {
         "tool": "sux",
-        "label": "VFilter(Fuse+LGE)",
-        # Fuse + lazy Gaussian elimination + ε-cost sharding.
+        "label": "VFilter(Fuse+Aug)",
+        # Fuse + augmented peeling (for small shards) + ε-cost sharding.
         # The paper's main contribution.
-        "shard_edge": "fuse-lge3-shards",
+        "shard_edge": "fuse-aug3-shards",
         "build_bin": "vfilter",
         "bench_bin": "bench_vfilter",
         "build_threads": PARALLEL,
         "max_log2": 33,
     },
-    "FuseLge3Shards-seq": {
+    "FuseAug3Shards-seq": {
         "tool": "sux",
-        "label": "VFilter(Fuse+LGE,seq)",
+        "label": "VFilter(Fuse+Aug,seq)",
         # Same structure, single-threaded build.
         # Used only for construction-time comparison (no query benchmark).
-        "shard_edge": "fuse-lge3-shards",
+        "shard_edge": "fuse-aug3-shards",
         "build_bin": "vfilter",
         "bench_bin": "bench_vfilter",
         "build_threads": 1,
@@ -147,13 +147,18 @@ METHODS = {
     # HEM-sharded VFilter (the sharding ablation)
     # -----------------------------------------------------------------
     #
-    # Identical to FuseLge3Shards in every respect but the layout: same
+    # Identical to FuseAug3Shards in every respect but the layout: same
     # signatures, same shard selection, same fuse-graph edges, same expansion
     # factor and segment-size law, same value backends, and by default the
     # same number of shards. What differs is that shards keep their natural,
     # unequal sizes, so their offsets have to be stored and loaded, and each
     # shard carries a local seed. The gap against VFilter is therefore the
-    # cost of the offset/seed indirection alone. See hem-vfilter/src/lib.rs.
+    # cost of the offset/seed indirection alone. The exception is below
+    # 2·10⁷ keys, where VFilter solves its shards by augmented peeling, with
+    # an expansion factor that plain peeling cannot reach: there we use the
+    # expansion factor and segment-size law of plain peeling, which make the
+    # graphs 1.8–4.2% larger but do not change the work of a query. See
+    # hem-vfilter/src/lib.rs.
     #
     # Build:  hem_vfilter -n <n> --bits <b> <outfile>
     # Query:  bench_hem_vfilter <query_keys> <outfile>
@@ -162,9 +167,9 @@ METHODS = {
     # That fits 2^33 keys on a 384 GiB machine.
     #
     # This method appears in the query figures and in the filter table, but not
-    # in the construction figures: it has no lazy Gaussian elimination and a
-    # plain peeling loop, so its build time would differ from VFilter's for
-    # reasons that have nothing to do with sharding.
+    # in the construction figures: it has no augmented peeling and a plain
+    # peeling loop, so its build time would differ from VFilter's for reasons
+    # that have nothing to do with sharding.
     "HemVFilter": {
         "tool": "hem",
         "label": "HEM(Fuse)",
@@ -284,8 +289,8 @@ METHODS = {
     # metric (bits-agnostic).
     "VFunc": {
         "tool": "sux",
-        "label": "VFunc(Fuse+LGE)",
-        "shard_edge": "fuse-lge3-shards",
+        "label": "VFunc(Fuse+Aug)",
+        "shard_edge": "fuse-aug3-shards",
         "build_bin": "vfunc",
         "bench_bin": "bench_vfunc",
         "bits_agnostic": True,
@@ -459,10 +464,10 @@ FIGURES = {
         "methods": [
             "Fuse3NoShards64",
             "Fuse3NoShards128",
-            "FuseLge3Shards",
+            "FuseAug3Shards",
             "Mwhc3",
             "BuRR",
-            "FuseLge3Shards-seq",
+            "FuseAug3Shards-seq",
             "BuRR-seq",
         ],
         "column": "constr_ns",
@@ -475,7 +480,7 @@ FIGURES = {
         "methods": [
             "Fuse3NoShards64",
             "Fuse3NoShards128",
-            "FuseLge3Shards",
+            "FuseAug3Shards",
             "HemVFilter",
             "Mwhc3",
             "BuRR",
@@ -490,7 +495,7 @@ FIGURES = {
         "methods": [
             "Fuse3NoShards64",
             "Fuse3NoShards128",
-            "FuseLge3Shards",
+            "FuseAug3Shards",
             "HemVFilter",
             "Mwhc3",
             "BuRR",
@@ -504,9 +509,9 @@ FIGURES = {
     "sharding-even": {
         "title": "Sequential Construction (8, 16, 32 bits)",
         "style_group": "sharding",
-        "methods": ["FuseLge3Shards-seq", "Fuse3NoShards128"],
+        "methods": ["FuseAug3Shards-seq", "Fuse3NoShards128"],
         "series_bits": EVEN_BITS,
-        "labels": {"FuseLge3Shards-seq": "VFilter(Fuse+LGE)"},
+        "labels": {"FuseAug3Shards-seq": "VFilter(Fuse+Aug)"},
         "y_group": "sharding",
         "column": "constr_ns",
         "ylabel": "ns/key",
@@ -514,9 +519,9 @@ FIGURES = {
     "sharding-odd": {
         "title": "Sequential Construction (9, 17, 33 bits)",
         "style_group": "sharding",
-        "methods": ["FuseLge3Shards-seq", "Fuse3NoShards128"],
+        "methods": ["FuseAug3Shards-seq", "Fuse3NoShards128"],
         "series_bits": ODD_BITS,
-        "labels": {"FuseLge3Shards-seq": "VFilter(Fuse+LGE)"},
+        "labels": {"FuseAug3Shards-seq": "VFilter(Fuse+Aug)"},
         "y_group": "sharding",
         "column": "constr_ns",
         "ylabel": "ns/key",

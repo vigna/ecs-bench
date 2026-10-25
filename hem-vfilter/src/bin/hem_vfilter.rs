@@ -52,7 +52,7 @@ fn run<V: Values>(args: &Args, make: impl Fn(usize) -> V) -> Result<()> {
     let elapsed = start.elapsed();
 
     eprintln!(
-        "HEM (fuse3 + LGE-free peeling); shards: 2^{}; vertices: {}",
+        "HEM (fuse3 + plain peeling); shards: 2^{}; vertices: {}",
         (filter.num_shards() as f64).log2() as u32,
         filter.num_vertices()
     );

@@ -160,10 +160,10 @@ the query path, and with them a memory dependency. Two methods measure that
 claim.
 
 **`HemVFilter`** is the ablation. The `hem-vfilter/` crate builds a filter that
-matches `FuseLge3Shards` in every part but the layout: same signatures, same
-shard selection, same fuse-graph edges, same expansion factor, same
-segment-size law, same value backends, same number of shards. Only the layout
-differs. Shards keep their natural, unequal sizes, so the builder stores their
+matches `FuseAug3Shards` in every part but the layout: same signatures, same
+shard selection, same fuse-graph edges, same value backends, same number of
+shards, and beyond 2·10⁷ keys the same expansion factor and segment-size law.
+Only the layout differs. Shards keep their natural, unequal sizes, so the builder stores their
 start positions in an array, and gives each shard a local seed. A query must
 load that array before it can build its edge. When a shard peels at the first
 try its seed is zero, and its edges and hashes are those of `VFilter`, bit for
@@ -174,14 +174,17 @@ replaces. Its query benchmark follows the protocol of `bench_vfilter`, and the
 harness drives it like any sux-rs method:
 
 ```sh
-python bench/run.py bench --method HemVFilter,FuseLge3Shards --bits 8
+python bench/run.py bench --method HemVFilter,FuseAug3Shards --bits 8
 ```
 
-The crate does not implement lazy Gaussian elimination, so it refuses fewer
-than a million keys. It also keeps all signatures in core, where `VFilter`
-streams them through a disk-backed store, so it stops at 2³² keys. It also remixes the local seed with one multiplication,
+The crate does not implement augmented peeling, which `VFilter` uses up to
+2·10⁷ keys. There it peels the same shards with the expansion factor and
+segment-size law of plain peeling, so its graphs are 1.8–4.2% larger between
+2²⁰ and 2²⁴ keys, and it refuses fewer than a million keys. It also keeps all
+signatures in core, where `VFilter` streams them through a disk-backed store,
+so it stops at 2³² keys. It also remixes the local seed with one multiplication,
 where Sux4J re-hashes the whole signature. The measured gap is therefore a
-lower bound. `hem-vfilter/src/lib.rs` explains both points, and why a cheaper
+lower bound. `hem-vfilter/src/lib.rs` explains these points, and why a cheaper
 remix fails.
 
 To check a build instead of timing it:
@@ -202,9 +205,9 @@ differ, so this row is not an ablation: it shows what HEM costs in practice.
 
 `HemVFilter` appears in the query figures and in the filter table, and answers
 to `par-bench` like any sux-rs method. It does not appear in the construction
-figures: its plain peeling loop and missing lazy Gaussian elimination would
-make its build time differ from `VFilter`'s for reasons that have nothing to do
-with sharding. GOV3 reports no construction time either, because Java builds
+figures: its plain peeling loop and missing augmented peeling would make its
+build time differ from `VFilter`'s for reasons that have nothing to do with
+sharding. GOV3 reports no construction time either, because Java builds
 it.
 
 ### CPU pinning
