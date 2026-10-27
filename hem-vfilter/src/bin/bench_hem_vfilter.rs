@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use hem_vfilter::{Aligned, HemVFilter, Header, Packed, PackedU, Values, read_header};
+use hem_vfilter::{Aligned, Header, HemVFilter, Packed, PackedU, Values, read_header};
 use std::io::{BufReader, Read};
 
 const INCR: usize = 0x9e37_79b9_7f4a_7c15;
@@ -87,33 +87,31 @@ fn main() -> Result<()> {
 
     let mut r = BufReader::new(std::fs::File::open(&args.filter)?);
     let header = read_header(&mut r)?;
-
-    let mut bytes = vec![0u8; header.num_bytes];
-    r.read_exact(&mut bytes)?;
+    let num_bytes = header.num_bytes;
 
     // Rebuild the same backend the builder used, so that the query path is the
     // one VFilter would take for this width.
     match header.bit_width {
         8 => {
-            let data = Aligned::<u8>::from_boxed(bytes.into_boxed_slice());
+            let data = Aligned::<u8>::from_boxed(read_boxed::<u8>(&mut r, num_bytes)?);
             run(&args, header, data)
         }
         16 => {
-            let data = Aligned::<u16>::from_boxed(cast_boxed::<u16>(bytes));
+            let data = Aligned::<u16>::from_boxed(read_boxed::<u16>(&mut r, num_bytes)?);
             run(&args, header, data)
         }
         32 => {
-            let data = Aligned::<u32>::from_boxed(cast_boxed::<u32>(bytes));
+            let data = Aligned::<u32>::from_boxed(read_boxed::<u32>(&mut r, num_bytes)?);
             run(&args, header, data)
         }
         b if !header.unaligned => {
-            let words = cast_boxed::<u64>(bytes);
+            let words = read_boxed::<u64>(&mut r, num_bytes)?;
             let n = header.num_values;
             let data = Packed::from_parts(words, b, n);
             run(&args, header, data)
         }
         b => {
-            let words = cast_boxed::<u64>(bytes);
+            let words = read_boxed::<u64>(&mut r, num_bytes)?;
             let n = header.num_values;
             let data = PackedU::from_parts(words, b, n);
             run(&args, header, data)
@@ -121,22 +119,18 @@ fn main() -> Result<()> {
     }
 }
 
-/// Reinterprets a byte buffer as a boxed slice of `W`.
+/// Reads `num_bytes` bytes into a boxed slice of `W`.
 ///
-/// The buffer is copied into a freshly allocated, correctly aligned slice; the
-/// cost is paid once, outside the timed region.
-fn cast_boxed<W: Copy + Default>(bytes: Vec<u8>) -> Box<[W]> {
-    assert!(bytes.len() % size_of::<W>() == 0, "misaligned value array");
-    let len = bytes.len() / size_of::<W>();
-    let mut out = vec![W::default(); len].into_boxed_slice();
-    // SAFETY: the destination has exactly bytes.len() bytes, and any bit
-    // pattern is a valid unsigned integer.
-    unsafe {
-        std::ptr::copy_nonoverlapping(
-            bytes.as_ptr(),
-            out.as_mut_ptr() as *mut u8,
-            bytes.len(),
-        );
-    }
-    out
+/// The bytes are read directly into a freshly allocated, correctly aligned
+/// slice, so that, unlike reading into a byte buffer and then copying, the
+/// memory used is just that of the values: this matters when many instances
+/// run in parallel.
+fn read_boxed<W: Copy + Default>(r: &mut impl Read, num_bytes: usize) -> Result<Box<[W]>> {
+    assert!(num_bytes % size_of::<W>() == 0, "misaligned value array");
+    let mut out = vec![W::default(); num_bytes / size_of::<W>()].into_boxed_slice();
+    // SAFETY: the slice has exactly num_bytes bytes, and any bit pattern is a
+    // valid unsigned integer.
+    let bytes = unsafe { std::slice::from_raw_parts_mut(out.as_mut_ptr() as *mut u8, num_bytes) };
+    r.read_exact(bytes)?;
+    Ok(out)
 }

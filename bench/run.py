@@ -1561,18 +1561,17 @@ def cmd_par_bench(args):
             if "query_median" in qdata:
                 medians.append(qdata["query_median"])
         medians.sort()
-        if medians:
-            agg_min = medians[0]
-            agg_med = medians[len(medians) // 2]
-            agg_max = medians[-1]
-            agg_avg = sum(medians) / len(medians)
+        # A result from fewer instances (e.g., some were killed for lack of
+        # memory) would measure a lighter load, so we record nothing
+        if len(medians) == args.jobs:
+            agg_err.write_text(
+                f"Min: {medians[0]} Median: {medians[len(medians) // 2]} "
+                f"Max: {medians[-1]} "
+                f"Average: {sum(medians) / len(medians)}\n"
+            )
         else:
-            agg_min = agg_med = agg_max = agg_avg = 0.0
-
-        agg_err.write_text(
-            f"Min: {agg_min} Median: {agg_med} "
-            f"Max: {agg_max} Average: {agg_avg}\n"
-        )
+            print(f"  ERROR: {len(medians)}/{args.jobs} instances completed;"
+                  f" no result recorded", file=sys.stderr)
 
         # --- Clean up ---
         shutil.rmtree(instance_dir, ignore_errors=True)
