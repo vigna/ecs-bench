@@ -89,7 +89,7 @@ METHODS = {
         "build_bin": "vfilter",
         "bench_bin": "bench_vfilter",
         "build_threads": None,  # no sharding ⇒ single-threaded build
-        "max_log2": 31,  # 64-bit sig space limits max size
+        "max_log2": 31,  # u32 vertices: 2^32 keys need more than 2^32 vertices
         "build_extra": ["--seed", "1"],
     },
     "Fuse3NoShards128": {
@@ -509,7 +509,11 @@ FIGURES = {
     "sharding-even": {
         "title": "Sequential Construction (8, 16, 32 bits)",
         "style_group": "sharding",
-        "methods": ["FuseAug3Shards-seq", "Fuse3NoShards128"],
+        # Nine series: the legend needs room above the lines
+        "legend_loc": "upper left",
+        "legend_ncol": 2,
+        "ymax_factor": 1.5,
+        "methods": ["FuseAug3Shards-seq", "Fuse3NoShards128", "Fuse3NoShards64"],
         "series_bits": EVEN_BITS,
         "labels": {"FuseAug3Shards-seq": "VFilter(Fuse+Aug)"},
         "y_group": "sharding",
@@ -519,7 +523,11 @@ FIGURES = {
     "sharding-odd": {
         "title": "Sequential Construction (9, 17, 33 bits)",
         "style_group": "sharding",
-        "methods": ["FuseAug3Shards-seq", "Fuse3NoShards128"],
+        # Nine series: the legend needs room above the lines
+        "legend_loc": "upper left",
+        "legend_ncol": 2,
+        "ymax_factor": 1.5,
+        "methods": ["FuseAug3Shards-seq", "Fuse3NoShards128", "Fuse3NoShards64"],
         "series_bits": ODD_BITS,
         "labels": {"FuseAug3Shards-seq": "VFilter(Fuse+Aug)"},
         "y_group": "sharding",
