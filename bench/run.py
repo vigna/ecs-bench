@@ -2137,7 +2137,8 @@ def _figure_series(fig_cfg, bits, args):
 
     A preset has either a "column", or a list of "columns", that is, of
     (column, label suffix, line style) triples, which yields a series per
-    method and column."""
+    method and column; "method_columns" maps methods to lists of triples
+    replacing "columns" for those methods."""
     series_bits = fig_cfg.get("series_bits")
     result = []
     for method_name in fig_cfg["methods"]:
@@ -2150,7 +2151,8 @@ def _figure_series(fig_cfg, bits, args):
         tool_for_parse = _parse_tool(cfg["tool"])
         label = fig_cfg.get("labels", {}).get(method_name, cfg["label"])
         widths = list(enumerate(series_bits)) if series_bits else [(None, bits)]
-        columns = fig_cfg.get("columns") or \
+        columns = fig_cfg.get("method_columns", {}).get(method_name) or \
+            fig_cfg.get("columns") or \
             [(fig_cfg["column"], "", cfg.get("linestyle", "-"))]
         for (pos, b), (col, suffix, linestyle) in itertools.product(widths,
                                                                     columns):

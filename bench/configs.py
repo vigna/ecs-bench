@@ -520,7 +520,12 @@ FIGURES = {
             "BuRR",
         ],
         "columns": [("multi_neg", "-neg", "-"), ("multi_pos", "-pos", "--")],
+        # VFilter costs the same on keys and non-keys, so it gets a single
+        # line of non-keys, as in the other query figures
+        "method_columns": {"FuseAug3Shards": [("multi_neg", "", "-")]},
         "ylabel": "ns/key",
+        # Room for the legend above the flat BuRR-pos lines
+        "ymax_factor": 1.5,
     },
     # --- Sharded vs unsharded sequential construction ---
     # One PDF per family of bit widths, with a series for each method and
