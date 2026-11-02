@@ -131,6 +131,19 @@ METHODS = {
         "no_queries": True,
         "max_log2": 33,
     },
+    "FuseAug3FullSigs": {
+        "tool": "sux",
+        "label": "VFilter(Fuse+Aug,full)",
+        # Same structure, but shards are solved using the full 128-bit
+        # signatures instead of 64-bit local signatures, as functions must do
+        # beyond about fifteen billion keys. Not in the paper: it provides
+        # evidence that queries cost the same.
+        "shard_edge": "fuse-aug3-full-sigs",
+        "build_bin": "vfilter",
+        "bench_bin": "bench_vfilter",
+        "build_threads": PARALLEL,
+        "max_log2": 33,
+    },
     "Mwhc3": {
         "tool": "sux",
         "label": "VFilter(MWHC)",
@@ -315,6 +328,22 @@ METHODS = {
         # Compared against PHastR + array, whose build+query run in one process
         # and therefore cannot be pinned.  Run VFunc queries unpinned
         # too so the comparison is apples-to-apples.
+        "pin_query": False,
+    },
+    "VFuncFullSigs": {
+        "tool": "sux",
+        "label": "VFunc(Fuse+Aug,full)",
+        # Same as VFunc, but with full signatures (see FuseAug3FullSigs).
+        # Not in the paper. Unpinned queries, as for VFunc.
+        "shard_edge": "fuse-aug3-full-sigs",
+        "build_bin": "vfunc",
+        "bench_bin": "bench_vfunc",
+        "bits_agnostic": True,
+        "build_threads": PARALLEL,
+        # At 2^33 keys full signatures halve the number of shards, so the
+        # 32 graphs being peeled double in size, and the in-memory build
+        # exceeds RAM on a 384 GiB machine (VFunc itself peaks at 344 GB)
+        "max_log2": 32,
         "pin_query": False,
     },
     # -----------------------------------------------------------------
