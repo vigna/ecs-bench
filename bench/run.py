@@ -1751,7 +1751,6 @@ def cmd_report(args):
                     _fmt(qd.get("query_median")),
                     _fmt(qd.get("query_max")),
                     _fmt(qd.get("query_avg")),
-                    "",
                     bpk,
                     "",
                 ])
