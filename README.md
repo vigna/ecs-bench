@@ -40,8 +40,7 @@ dependencies are:
 
 - `g++`, `boost-devel`, `tbb-devel`, `xxhash-devel`, `clang-devel`: C++
   toolchain plus headers needed by the BuRR / BuRR-VL / sdsl-lite build paths.
-- `cmake`, `ninja-build`, `make`, `git`, `parallel` (GNU parallel; needed by
-  `par-bench`).
+- `cmake`, `ninja-build`, `make`, `git`.
 - A JDK and Maven, for the Sux4J GOV3 build path.
 - Python 3.9+, with `pip install matplotlib` (only needed for `plot`).
 - `zstd`, to decompress the string data.
@@ -86,8 +85,9 @@ Benchmarks are run by `bench/run.py`, which has several subcommands:
 
 - `bench` — build each (method, n, bits) triple, run queries, write a result
   file under `results/<method>/` (by default).
-- `par-bench` — build once, run `--jobs` parallel query instances via GNU
-  parallel, write the aggregate.
+- `multi-bench` — the highly parallel query benchmark of the BuRR paper: for
+  each size *n*, build 2³³/*n* structures of *n* keys and query them at random
+  with all hardware threads, on keys and on non-keys.
 - `report` — print a TSV report of all completed runs.
 - `plot` — produce paper figures (PDF) under `figs/` (by default).
 - `table` — print LaTeX tables.
@@ -132,15 +132,19 @@ never recomputes a data point that already has a result file, so it is safe
    python bench/run.py bench --max-log2 25
    ```
 
-4. For the parallel-query column of the paper:
+4. For the parallel-query figure and the parallel query columns of the filter
+   table:
 
    ```sh
-   python bench/run.py par-bench --threads 32
+   python bench/run.py multi-bench
    ```
 
-   `--jobs` sets the number of instances, and defaults to 32 (the number
-   used in the paper), or to the number of CPUs if smaller. `par-bench` will
-   also automatically limit the maximum size based on the physical RAM.
+   By default it runs `FuseAug3Shards` (with BuRR's own benchmark ported to
+   Rust in `multi-vfilter/`) and `BuRR` (with BuRR's `parbench.cpp`) at all
+   output widths, from 2²⁰ to 2³³ keys, building the structures and querying
+   them with as many threads as there are CPUs. All structures are in memory
+   at the same time, so `--total-log2` makes the total number of keys smaller
+   on smaller machines.
 
 5. Render the figures and tables once the matrix is populated:
 
@@ -204,12 +208,11 @@ that gives some 716 000 buckets and an offset array of several megabytes,
 against the few dozen shards `VFilter` picks. The solver and the space also
 differ, so this row is not an ablation: it shows what HEM costs in practice.
 
-`HemVFilter` appears in the query figures and in the filter table, and answers
-to `par-bench` like any sux-rs method. It does not appear in the construction
-figures: its plain peeling loop and missing augmented peeling would make its
-build time differ from `VFilter`'s for reasons that have nothing to do with
-sharding. GOV3 reports no construction time either, because Java builds
-it.
+`HemVFilter` appears in the single-threaded query figures and in the filter
+table. It does not appear in the construction figures: its plain peeling loop
+and missing augmented peeling would make its build time differ from `VFilter`'s
+for reasons that have nothing to do with sharding. GOV3 reports no construction
+time either, because Java builds it.
 
 ### CPU pinning
 
@@ -229,7 +232,9 @@ not artificially serialised.
 results/
   <method>/
     bench.<n>.<bits>.err        stdout/stderr of one build+query
-    parbench.<n>.<bits>.err     aggregate of one par-bench run
+    multibench.<n>.<bits>.<k>.<t>.<queries>.<build threads>.out
+                                one multi-bench run (k structures of n keys,
+                                t query threads)
     data/                       transient serialized structures
                                 (deleted unless --keep-data)
 ```

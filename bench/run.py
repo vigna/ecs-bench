@@ -20,10 +20,9 @@ Usage examples:
     # Report to stdout
     python bench/run.py report --method FuseAug3Shards --bits 8
 
-    # Parallel query benchmark (N instances via GNU parallel; defaults
-    # to min(32, cpu_count()), override with --jobs)
-    python bench/run.py par-bench --method FuseAug3Shards --bits 8 \\
-        --max-log2 30
+    # BuRR-style parallel query benchmark (2^33 / n structures of n keys
+    # queried at random by all hardware threads)
+    python bench/run.py multi-bench --method FuseAug3Shards,BuRR --bits 8
 
     # Generate paper figures
     python bench/run.py plot --figure filter-build --bits even
@@ -54,7 +53,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from configs import (  # noqa: E402
     ALL_BITS,
     BITS_AGNOSTIC_TOOLS,
-    DEFAULT_PAR_JOBS,
     DEFAULT_THREADS,
     EVEN_BITS,
     FIGURES,
@@ -225,34 +223,6 @@ def size_check(outfile, n, text):
     return (f"WARNING: file size {file_bytes} B differs by {rel*100:.2f}% "
             f"from self-reported {bpk:.3f} bits/key "
             f"(expected ~{expected:.0f} B)\n")
-
-
-# Fraction of physical RAM the par-query benchmark is allowed to use.
-# Leaves headroom for the kernel page cache (keys file), GNU parallel,
-# and per-process scratch outside the mmap'd structure.
-PAR_QUERY_MEM_FRACTION = 0.90
-
-
-def _total_ram_bytes():
-    """Total physical RAM in bytes, via sysconf (Linux + macOS)."""
-    return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
-
-
-def par_query_limit(bits, jobs):
-    """Maximum n for which the par-query benchmark fits in RAM.
-
-    ``jobs`` mmap'd copies of the same bit-packed file each cost
-    ``n * bits / 8`` bytes of resident memory under load (the OS does
-    not share dirtied/faulted pages across processes in practice).
-    Cap the aggregate at PAR_QUERY_MEM_FRACTION of physical RAM:
-
-        jobs * n * bits / 8  ≤  fraction * total_ram
-        ⇒  n ≤ 8 * fraction * total_ram / (jobs * bits)
-    """
-    if bits <= 0 or jobs <= 0:
-        return 0
-    budget_bytes = int(PAR_QUERY_MEM_FRACTION * _total_ram_bytes())
-    return (8 * budget_bytes) // (jobs * bits)
 
 
 # =====================================================================
@@ -596,7 +566,7 @@ def sux_query_cmd(cfg, n, bits, infile, args):
 def burr_bench_cmd(cfg, n, bits, args, serialize_to=None):
     """Assemble the BuRR ribbon build command line.
 
-    Pass serialize_to to write the structure for later query / par-query.
+    Pass serialize_to to write the structure for later queries.
     Caller should append -Q to suppress queries during the build step.
 
     Example output:
@@ -1424,175 +1394,6 @@ def _bench_java(cfg, method_name, n, bits, log2_n, rdir, args):
 
 
 # =====================================================================
-#  Subcommand: par-bench
-# =====================================================================
-
-
-def cmd_par_bench(args):
-    """Build a structure, run parallel query instances, and clean up.
-
-    For each (method, bits, n) triple:
-      1. Build the structure and serialize it to disk.
-      2. Launch --jobs query instances via GNU parallel, all reading
-         the same serialized file.
-      3. Compute the median of per-instance median query times — this
-         represents typical throughput under memory contention.
-      4. Delete the serialized file and per-instance outputs.
-
-    For sux-rs: build with vfilter, query with bench_vfilter × jobs.
-    For BuRR: build with ribbon -w, query with ribbon -r × jobs.
-    """
-    methods = resolve_methods(args.method)
-    bits_list = resolve_bits(args.bits)
-
-    sux_needed = any(METHODS[m]["tool"] == "sux" for m in methods)
-    burr_needed = any(METHODS[m]["tool"] == "burr" for m in methods)
-    burr_ok = True
-
-    if sux_needed:
-        ensure_sux_built(args.sux_dir)
-    if any(METHODS[m]["tool"] == "hem" for m in methods):
-        if not ensure_hem_built():
-            methods = [m for m in methods if METHODS[m]["tool"] != "hem"]
-    if burr_needed:
-        burr_ok = ensure_burr_built(args.burr_dir, bits_list,
-                                    burr_targets(methods))
-
-    # Build work list sorted by size, like cmd_bench.
-    # Only filter methods (non-bits-agnostic) make sense for par-bench.
-    work = []
-    for method_name in methods:
-        cfg = METHODS[method_name]
-
-        if cfg.get("no_queries"):
-            continue
-        if cfg["tool"] == "burr" and not burr_ok:
-            print(f"Skipping {method_name} (BuRR not available)")
-            continue
-        if cfg["tool"] in ("csf", "comp-vfunc", "phastr", "mmphf", "lemonhash",
-                          "mmphf-str", "lemonhash-str", "java"):
-            continue
-        if cfg.get("bits_agnostic"):
-            continue
-
-        for bits in bits_list:
-            max_log2 = effective_max_log2(args, cfg, bits)
-            max_n = par_query_limit(bits, args.jobs)
-            for log2_n in range(MIN_LOG2, max_log2 + 1):
-                n = 1 << log2_n
-                if n > max_n:
-                    continue
-                work.append((log2_n, method_name, bits))
-
-    work.sort(key=lambda t: t[0])
-
-    for log2_n, method_name, bits in work:
-        cfg = METHODS[method_name]
-        n = 1 << log2_n
-        rdir = result_dir(args.results_dir, method_name)
-        ddir = data_dir(args.results_dir, method_name)
-
-        agg_err = rdir / f"parbench.{n}.{bits}.err"
-        tool_for_parse = _parse_tool(cfg["tool"])
-        if not args.force and agg_err.exists() and \
-                parse_query(agg_err.read_text(), tool_for_parse):
-            continue
-
-        # --- Build and serialize ---
-        outfile = ddir / f"filter.{n}.{bits}.bin"
-
-        if cfg["tool"] == "sux":
-            build_cmd = sux_build_cmd(cfg, n, bits, outfile, args)
-        elif cfg["tool"] == "hem":
-            build_cmd = hem_build_cmd(cfg, n, bits, outfile, args)
-        else:
-            build_cmd = burr_bench_cmd(cfg, n, bits, args,
-                                       serialize_to=outfile)
-            build_cmd += ["-Q"]
-
-        print(f"  par-bench {method_name} n=2^{log2_n} bits={bits}"
-              f" (build)")
-        br = run_cmd(build_cmd, dry_run=args.dry_run)
-        if not args.dry_run and br.returncode != 0:
-            continue
-
-        if args.dry_run:
-            print(f"  [dry-run] echo <{args.jobs} commands> | "
-                  f"parallel -j {args.jobs}")
-            continue
-
-        if not outfile.exists():
-            print(f"  ERROR: serialized file not created",
-                  file=sys.stderr)
-            continue
-
-        # --- Parallel queries ---
-        if cfg["tool"] == "sux":
-            qcmd = sux_query_cmd(cfg, n, bits, outfile, args)
-        elif cfg["tool"] == "hem":
-            qcmd = hem_query_cmd(cfg, n, bits, outfile, args)
-        else:
-            qcmd = burr_query_cmd(cfg, n, bits, outfile, args)
-
-        instance_dir = rdir / f"parbench.{n}.{bits}.d"
-        instance_dir.mkdir(parents=True, exist_ok=True)
-
-        jobs = []
-        for i in range(args.jobs):
-            out_file = instance_dir / f"{i}.err"
-            if cfg["tool"] in ("sux", "hem"):
-                job = shlex.join(qcmd) + f" 2>{out_file}"
-            else:
-                job = shlex.join(qcmd) + f" >{out_file}"
-            jobs.append(job)
-
-        print(f"  par-bench {method_name} n=2^{log2_n} bits={bits}"
-              f" ({args.jobs} queries)")
-
-        par_input = "\n".join(jobs)
-        r = subprocess.run(
-            ["parallel", "-j", str(args.jobs)],
-            input=par_input, capture_output=True, text=True,
-        )
-        if r.returncode != 0:
-            print(f"  WARNING: parallel returned {r.returncode}",
-                  file=sys.stderr)
-
-        # Aggregate: honest Min/Median/Max/Average over the
-        # per-instance medians.  Each instance reports its own
-        # Min/Median/Max/Average over its 5 repeats; we keep the median
-        # of those (the representative per-instance time) and then
-        # summarize the distribution across instances.
-        medians = []
-        for i in range(args.jobs):
-            ifile = instance_dir / f"{i}.err"
-            if not ifile.exists():
-                continue
-            qdata = parse_query(ifile.read_text(), tool_for_parse)
-            if "query_median" in qdata:
-                medians.append(qdata["query_median"])
-        medians.sort()
-        # A result from fewer instances (e.g., some were killed for lack of
-        # memory) would measure a lighter load, so we record nothing
-        if len(medians) == args.jobs:
-            agg_err.write_text(
-                f"Min: {medians[0]} Median: {medians[len(medians) // 2]} "
-                f"Max: {medians[-1]} "
-                f"Average: {sum(medians) / len(medians)}\n"
-            )
-        else:
-            print(f"  ERROR: {len(medians)}/{args.jobs} instances completed;"
-                  f" no result recorded", file=sys.stderr)
-
-        # --- Clean up ---
-        shutil.rmtree(instance_dir, ignore_errors=True)
-        if outfile.exists():
-            outfile.unlink()
-
-    print("Done.")
-
-
-# =====================================================================
 #  Subcommand: multi-bench
 # =====================================================================
 
@@ -1900,7 +1701,7 @@ def cmd_report(args):
 
     Columns:
         n  dataset  bits  method  constr_ns  query_min  query_median
-        query_max  query_avg  parbench_med  bits_per_key  overhead_pct
+        query_max  query_avg  bits_per_key  overhead_pct
 
     For filters (sux, burr), overhead_pct is relative to the bit width.
     For compressed functions (csf, comp-vfunc), it is relative to the
@@ -1913,8 +1714,8 @@ def cmd_report(args):
     bits_list = resolve_bits(args.bits)
 
     cols = ["n", "dataset", "bits", "method", "constr_ns", "query_min",
-            "query_median", "query_max", "query_avg", "parbench_med",
-            "bits_per_key", "overhead_pct"]
+            "query_median", "query_max", "query_avg", "bits_per_key",
+            "overhead_pct"]
 
     rows = []
     for method_name in methods:
@@ -1977,12 +1778,6 @@ def cmd_report(args):
                 bd = parse_build(text, tool_for_parse)
                 qd = parse_query(text, tool_for_parse)
 
-                pq_err = rdir / f"parbench.{n}.{bits}.err"
-                pq_med = ""
-                if pq_err.exists():
-                    pqd = parse_query(pq_err.read_text(), tool_for_parse)
-                    pq_med = pqd.get("query_median", "")
-
                 bpk_val = parse_bits_per_key(text, n)
                 bpk = f"{bpk_val:.2f}" if bpk_val is not None else ""
                 overhead = ""
@@ -1999,7 +1794,6 @@ def cmd_report(args):
                     _fmt(qd.get("query_median")),
                     _fmt(qd.get("query_max")),
                     _fmt(qd.get("query_avg")),
-                    _fmt(pq_med),
                     bpk,
                     overhead,
                 ])
@@ -2068,14 +1862,11 @@ def _figure_value(rdir, n, bits, col, tool):
     key = (rdir, n, bits, col, tool)
     if key not in _figure_values:
         bench_err = rdir / f"bench.{n}.{bits}.err"
-        pq_err = rdir / f"parbench.{n}.{bits}.err"
         val = None
         if col == "constr_ns" and bench_err.exists():
             val = parse_build(bench_err.read_text(), tool).get("constr_ns")
         elif col.startswith("query_") and bench_err.exists():
             val = parse_query(bench_err.read_text(), tool).get(col)
-        elif col == "parbench_med" and pq_err.exists():
-            val = parse_query(pq_err.read_text(), tool).get("query_median")
         elif col in ("multi_neg", "multi_pos"):
             val = _multi_value(rdir, n, bits, col)
         _figure_values[key] = val
@@ -2282,7 +2073,7 @@ def cmd_status(args):
             print(f"{method_name:24s}  bench {done}/{total}")
             continue
 
-        done_bench, done_pq = 0, 0
+        done_bench = 0
         total = 0
         bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in BITS_AGNOSTIC_TOOLS)
         method_bits = [0] if bits_agnostic else bits_list
@@ -2299,13 +2090,8 @@ def cmd_status(args):
                 if result_complete(rdir / f"bench.{n}.{bits}.err", tool_for_parse,
                                    no_queries=cfg.get("no_queries", False)):
                     done_bench += 1
-                pq_path = rdir / f"parbench.{n}.{bits}.err"
-                if pq_path.exists() and "query_min" in parse_query(
-                        pq_path.read_text(), tool_for_parse):
-                    done_pq += 1
 
-        print(f"{method_name:24s}  bench {done_bench}/{total}"
-              f"  par-bench {done_pq}/{total}")
+        print(f"{method_name:24s}  bench {done_bench}/{total}")
 
 
 # =====================================================================
@@ -2967,12 +2753,6 @@ def make_parser():
     b.add_argument("--no-keep-data", action="store_false", dest="keep_data",
                    help="Delete serialized files after query (default)")
 
-    # --- par-bench ---
-    pq = sub.add_parser("par-bench", help="Build, run parallel queries, clean up")
-    add_common(pq)
-    pq.add_argument("--jobs", type=int, default=DEFAULT_PAR_JOBS,
-                    help=f"Number of parallel instances (default: {DEFAULT_PAR_JOBS})")
-
     # --- multi-bench ---
     mb = sub.add_parser("multi-bench",
                         help="BuRR-style parallel queries on many structures")
@@ -3055,7 +2835,6 @@ def main():
 
     dispatch = {
         "bench": cmd_bench,
-        "par-bench": cmd_par_bench,
         "multi-bench": cmd_multi_bench,
         "report": cmd_report,
         "plot": cmd_plot,
