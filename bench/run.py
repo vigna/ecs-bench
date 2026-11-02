@@ -39,6 +39,7 @@ Environment variables:
 """
 
 import argparse
+import itertools
 import os
 import shlex
 import shutil
@@ -298,12 +299,14 @@ def ensure_csf_built():
     return True
 
 
-def ensure_burr_built(burr_dir, bits_values):
+def ensure_burr_built(burr_dir, bits_values, targets=("bench",)):
     """Compile BuRR binaries for each requested bit width.
 
     BuRR compiles the bit width into the binary via -DRIBBON_BITS=X,
     producing e.g. bench8, bench16, bench32.  We use the 'bench'
-    Makefile target (-O3 -DNDEBUG), not 'ribbon' (-O2, assertions on).
+    Makefile target (-O3 -DNDEBUG), not 'ribbon' (-O2, assertions on),
+    and the 'benchpos' target, which differs only in that it queries keys
+    of the filter.
     """
     burr = Path(burr_dir)
     if not burr.exists():
@@ -320,20 +323,26 @@ def ensure_burr_built(burr_dir, bits_values):
          if f.suffix in (".cpp", ".hpp") or f.name == "Makefile"),
         default=0.0,
     )
-    for bits in bits_values:
-        binary = burr / f"bench{bits}"
+    for target, bits in itertools.product(targets, bits_values):
+        binary = burr / f"{target}{bits}"
         if binary.exists() and binary.stat().st_mtime >= src_mtime:
             continue
-        print(f"Building BuRR bench{bits} in {burr}…")
+        print(f"Building BuRR {target}{bits} in {burr}…")
         r = subprocess.run(
             ["make", f"RIBBON_BITS={bits}",
-             "OPTFLAGS=-O3 -DNDEBUG -march=native -fPIE -fno-strict-aliasing", "bench"],
+             "OPTFLAGS=-O3 -DNDEBUG -march=native -fPIE -fno-strict-aliasing", target],
             cwd=str(burr), capture_output=True, text=True,
         )
         if r.returncode != 0:
             print(r.stderr, file=sys.stderr)
-            sys.exit(f"BuRR make failed for RIBBON_BITS={bits}")
+            sys.exit(f"BuRR make {target} failed for RIBBON_BITS={bits}")
     return True
+
+
+def burr_targets(methods):
+    """The BuRR Makefile targets needed by a list of methods."""
+    return sorted({METHODS[m]["burr_binary"] for m in methods
+                   if METHODS[m]["tool"] == "burr"})
 
 
 def ensure_lemonhash_built():
@@ -819,7 +828,8 @@ def cmd_bench(args):
     if mmphf_needed or mmphf_str_needed:
         ensure_mmphf_built(args.sux_dir)
     if burr_needed:
-        burr_ok = ensure_burr_built(args.burr_dir, bits_list)
+        burr_ok = ensure_burr_built(args.burr_dir, bits_list,
+                                    burr_targets(methods))
     if csf_needed:
         csf_ok = ensure_csf_built()
     if lemonhash_needed:
@@ -1445,7 +1455,8 @@ def cmd_par_bench(args):
         if not ensure_hem_built():
             methods = [m for m in methods if METHODS[m]["tool"] != "hem"]
     if burr_needed:
-        burr_ok = ensure_burr_built(args.burr_dir, bits_list)
+        burr_ok = ensure_burr_built(args.burr_dir, bits_list,
+                                    burr_targets(methods))
 
     # Build work list sorted by size, like cmd_bench.
     # Only filter methods (non-bits-agnostic) make sense for par-bench.
@@ -1578,6 +1589,288 @@ def cmd_par_bench(args):
         if outfile.exists():
             outfile.unlink()
 
+    print("Done.")
+
+
+# =====================================================================
+#  Subcommand: multi-bench
+# =====================================================================
+
+# Shard edges supported by multi_vfilter.
+MULTI_SHARD_EDGES = ("fuse-aug3-shards", "fuse3-no-shards64",
+                     "fuse3-no-shards128", "mwhc3")
+
+# Log2 of the total number of keys of the multi-bench sweep: each size n is
+# tested on 2^MULTI_TOTAL_LOG2 / n structures.
+MULTI_TOTAL_LOG2 = 33
+
+
+def multi_target_dir():
+    """Return the cargo target directory of the multi-vfilter crate.
+
+    Respects CARGO_TARGET_DIR, as sux_target_dir does.
+    """
+    return sux_target_dir(Path(REPO_ROOT) / "multi-vfilter")
+
+
+def ensure_multi_built():
+    """Compile the BuRR-style parallel benchmark for VFilter."""
+    crate = Path(REPO_ROOT) / "multi-vfilter"
+    print(f"Building multi-vfilter in {crate}…")
+    r = subprocess.run(
+        ["cargo", "build", "--profile", SUX_PROFILE],
+        cwd=str(crate), capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        sys.exit(f"multi-vfilter build failed (exit {r.returncode})")
+
+
+def ensure_burr_parbench_built(burr_dir, bits_values):
+    """Compile BuRR's parbench for each requested bit width.
+
+    As in ensure_burr_built, the binary (e.g., parbench8) is rebuilt only
+    if it is older than some source file.
+    """
+    burr = Path(burr_dir)
+    if not burr.exists():
+        sys.exit(f"BuRR directory {burr} not found")
+    src_mtime = max(
+        (f.stat().st_mtime for f in burr.iterdir()
+         if f.suffix in (".cpp", ".hpp") or f.name == "Makefile"),
+        default=0.0,
+    )
+    for bits in bits_values:
+        binary = burr / f"parbench{bits}"
+        if binary.exists() and binary.stat().st_mtime >= src_mtime:
+            continue
+        print(f"Building BuRR parbench{bits} in {burr}…")
+        r = subprocess.run(
+            ["make", f"RIBBON_BITS={bits}",
+             "OPTFLAGS=-O3 -DNDEBUG -march=native -fPIE -fno-strict-aliasing",
+             "parbench"],
+            cwd=str(burr), capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            print(r.stderr, file=sys.stderr)
+            sys.exit(f"BuRR make parbench failed for RIBBON_BITS={bits}")
+
+
+def multi_methods(arg):
+    """Methods that multi-bench can run: VFilter with the shard edges
+    supported by multi_vfilter, and BuRR."""
+    names = list(METHODS.keys()) if arg == "all" else resolve_methods(arg)
+    ok = []
+    for name in names:
+        cfg = METHODS[name]
+        if cfg.get("no_queries"):
+            if arg != "all":
+                sys.exit(f"multi-bench: {name} does not run queries")
+            continue
+        # parbench measures positive and negative queries in the same run
+        if cfg["tool"] == "burr" and cfg["burr_binary"] != "bench":
+            if arg != "all":
+                sys.exit(f"multi-bench: use BuRR instead of {name}")
+            continue
+        if cfg["tool"] == "sux" and cfg.get("build_bin") == "vfilter" and \
+                cfg.get("shard_edge") in MULTI_SHARD_EDGES:
+            ok.append(name)
+        elif cfg["tool"] == "burr":
+            ok.append(name)
+        elif arg != "all":
+            sys.exit(f"multi-bench does not support {name}")
+    return ok
+
+
+def burr_eps_numerator(cfg, burr_eps):
+    """Return (f, L) such that parbench is run with ε = -f / L.
+
+    parbench takes the number of slots m and builds m / (1 + ε) keys. With
+    burr_eps == "bench" we use the ε that the bench binary (ribbon.cpp),
+    used for all other BuRR results, picks by default: -4 / L for L > 32,
+    -3 / L otherwise; with burr_eps == "parbench" we use the default of
+    parbench.cpp, -3 / L.
+    """
+    flags = cfg["burr_flags"]
+    width = int(flags[flags.index("-L") + 1])
+    if burr_eps == "bench" and width > 32:
+        return 4, width
+    return 3, width
+
+
+def burr_slots(cfg, n, burr_eps):
+    """Number of slots per filter that makes parbench build n keys."""
+    f, width = burr_eps_numerator(cfg, burr_eps)
+    if (n * (width - f)) % width != 0:
+        sys.exit(f"multi-bench: with ε = -{f}/{width} the number of keys"
+                 f" must be a multiple of {width}")
+    return n * (width - f) // width
+
+
+def multi_cmd(cfg, n, bits, k, q, t, b, args):
+    """Assemble the command line of one multi-bench run."""
+    if cfg["tool"] == "sux":
+        cmd = [str(multi_target_dir() / "release" / "multi-vfilter")]
+        cmd += ["-n", str(n), "-k", str(k), "-q", str(q),
+                "-t", str(t), "-b", str(b)]
+        cmd += ["--bits", str(bits), "--shard-edge", cfg["shard_edge"]]
+        # Per-method extras: --seed, --eps
+        cmd += cfg.get("build_extra", [])
+    else:
+        burr = Path(args.burr_dir)
+        f, width = burr_eps_numerator(cfg, args.burr_eps)
+        cmd = [str(burr / f"parbench{bits}")]
+        cmd += ["-t", str(t), "-b", str(b)]
+        cmd += cfg["burr_flags"]
+        cmd += ["-e", repr(-f / width)]
+        cmd += ["-k", str(k), "-m", str(burr_slots(cfg, n, args.burr_eps)),
+                "-q", str(q)]
+    return cmd
+
+
+def parse_multi(text):
+    """Parse the last RESULT type=agg line of parbench or multi_vfilter
+    into a dictionary of floats (non-numeric values are skipped)."""
+    for line in reversed(text.splitlines()):
+        if line.startswith("RESULT type=agg"):
+            res = {}
+            for tok in line.split()[2:]:
+                key, _, value = tok.partition("=")
+                try:
+                    res[key] = float(value)
+                except ValueError:
+                    pass
+            return res
+    return None
+
+
+def multi_result_path(results_dir, method_name, cfg, n, bits, k, t, q, b,
+                      args):
+    """Result file of a run; BuRR files also record the choice of ε."""
+    suffix = f".eps-{args.burr_eps}" if cfg["tool"] == "burr" else ""
+    return result_dir(results_dir, method_name) / \
+        f"multibench.{n}.{bits}.{k}.{t}.{q}.{b}{suffix}.out"
+
+
+def multi_ok(res, cfg, n, k):
+    """Check a parsed result: all positive queries found, right size."""
+    if res is None or res.get("n") != n:
+        return False
+    if cfg["tool"] == "burr":
+        return res.get("ok") == 1
+    return res.get("k") == k
+
+
+def multi_configs(args):
+    """The (keys, structures) pairs of a multi-bench run: --keys and
+    --filters if --keys is given; otherwise, for each n = 2^l with l in
+    [--min-log2 . . --max-log2], 2^--total-log2 / n structures of n keys, so
+    that the total number of keys, and thus the memory, is the same for
+    all sizes."""
+    if args.keys is not None:
+        return [(args.keys, args.filters)]
+    total = args.total_log2
+    max_log2 = total if args.max_log2 is None else min(args.max_log2, total)
+    return [(1 << l, 1 << (total - l))
+            for l in range(args.min_log2, max_log2 + 1)]
+
+
+def multi_report(methods, bits_list, threads_list, configs, q, b, args):
+    """Print a TSV table of the multi-bench results that exist."""
+    print("\t".join(["method", "bits", "threads", "keys", "structures",
+                     "pos_ns", "neg_ns", "constr_s", "bits_per_key", "fpr"]))
+    for t, bits, (n, k) in itertools.product(threads_list, bits_list,
+                                             configs):
+        for method_name in methods:
+            cfg = METHODS[method_name]
+            path = multi_result_path(args.results_dir, method_name, cfg,
+                                     n, bits, k, t, q, b, args)
+            if not path.exists():
+                continue
+            res = parse_multi(path.read_text())
+            if res is None:
+                continue
+            label = method_name
+            if cfg["tool"] == "burr":
+                f, width = burr_eps_numerator(cfg, args.burr_eps)
+                label += f"(eps=-{f}/{width})"
+            print("\t".join([
+                label, str(bits), str(t), str(n), str(k),
+                f"{res['tpospq']:.2f}", f"{res['tneqpq']:.2f}",
+                f"{res['tcons'] / 1e3:.2f}",
+                f"{res['totalbytes'] * 8 / (n * k):.3f}",
+                f"{res['fpr']:.3g}",
+            ]))
+
+
+def cmd_multi_bench(args):
+    """BuRR-style parallel query benchmark.
+
+    Replicates the highly parallel workload of the BuRR paper, which uses
+    BuRR's parbench.cpp: k structures with n keys each (the same keys,
+    different seeds) are built in a single process with --build-threads
+    threads, and then each of t query threads performs --queries positive
+    and then --queries negative queries, each on a structure chosen at
+    random, for each t in --query-threads. The time per query is the total
+    query time of all threads divided by the number of queries. The (n, k)
+    pairs are given by multi_configs.
+
+    BuRR runs BuRR's parbench; VFilter runs multi_vfilter (multi-vfilter/),
+    which replicates parbench for sux-rs. Results are stored in
+    results/<method>/multibench.<n>.<bits>.<k>.<t>.<queries>.<build
+    threads>[.eps-<ε choice>].out.
+    """
+    methods = multi_methods(args.method)
+    bits_list = resolve_bits(args.bits)
+    threads_list = [int(t) for t in args.query_threads.split(",")]
+    configs = multi_configs(args)
+    q, b = args.queries, args.build_threads
+
+    if args.report:
+        multi_report(methods, bits_list, threads_list, configs, q, b, args)
+        return
+
+    # Fail now, not after hours of runs, if n is not compatible with BuRR
+    for method_name in methods:
+        if METHODS[method_name]["tool"] == "burr":
+            for n, _ in configs:
+                burr_slots(METHODS[method_name], n, args.burr_eps)
+
+    if not args.dry_run:
+        if any(METHODS[m]["tool"] == "sux" for m in methods):
+            ensure_multi_built()
+        if any(METHODS[m]["tool"] == "burr" for m in methods):
+            ensure_burr_parbench_built(args.burr_dir, bits_list)
+
+    for t, bits, (n, k) in itertools.product(threads_list, bits_list,
+                                             configs):
+        for method_name in methods:
+            cfg = METHODS[method_name]
+            path = multi_result_path(args.results_dir, method_name, cfg,
+                                     n, bits, k, t, q, b, args)
+            if not args.force and path.exists() and \
+                    multi_ok(parse_multi(path.read_text()), cfg, n, k):
+                continue
+            cmd = multi_cmd(cfg, n, bits, k, q, t, b, args)
+            print(f"  multi-bench {method_name} n={n} k={k} bits={bits}"
+                  f" threads={t}", flush=True)
+            r = run_cmd(cmd, dry_run=args.dry_run)
+            if args.dry_run:
+                continue
+            text = r.stdout + r.stderr
+            if r.returncode == 0 and \
+                    multi_ok(parse_multi(text), cfg, n, k):
+                path.write_text(text)
+            else:
+                # A stale result of an earlier run must not be reported
+                path.unlink(missing_ok=True)
+                path.with_suffix(".failed").write_text(text)
+                print(f"  ERROR: no result recorded (see "
+                      f"{path.with_suffix('.failed')})", file=sys.stderr,
+                      flush=True)
+
+    if not args.dry_run:
+        multi_report(methods, bits_list, threads_list, configs, q, b, args)
     print("Done.")
 
 
@@ -1783,8 +2076,38 @@ def _figure_value(rdir, n, bits, col, tool):
             val = parse_query(bench_err.read_text(), tool).get(col)
         elif col == "parbench_med" and pq_err.exists():
             val = parse_query(pq_err.read_text(), tool).get("query_median")
+        elif col in ("multi_neg", "multi_pos"):
+            val = _multi_value(rdir, n, bits, col)
         _figure_values[key] = val
     return _figure_values[key]
+
+
+def _multi_value(rdir, n, bits, col):
+    """The time per negative (multi_neg) or positive (multi_pos) query of a
+    multi-bench sweep result for n keys per structure, or None.
+
+    Only results of the sweep (2^MULTI_TOTAL_LOG2 / n structures) are used,
+    and, for BuRR, only those with the ε of the bench binary. If there are
+    several results, we use the one with the most query threads (then the
+    most queries, then the most construction threads).
+    """
+    k = (1 << MULTI_TOTAL_LOG2) // n
+    best = None
+    for path in rdir.glob(f"multibench.{n}.{bits}.{k}.*.out"):
+        # multibench.<n>.<bits>.<k>.<t>.<q>.<b>[.eps-<choice>].out
+        parts = path.name.split(".")
+        if len(parts) not in (8, 9) or \
+                (len(parts) == 9 and parts[7] != "eps-bench"):
+            continue
+        rank = (int(parts[4]), int(parts[5]), int(parts[6]))
+        if best is None or rank > best[0]:
+            best = (rank, path)
+    if best is None:
+        return None
+    res = parse_multi(best[1].read_text())
+    if res is None:
+        return None
+    return res.get("tneqpq" if col == "multi_neg" else "tpospq")
 
 
 def _bits_agnostic(fig_cfg):
@@ -1808,10 +2131,13 @@ def _panel_bits(fig_cfg, bits_list):
 
 def _figure_series(fig_cfg, bits, args):
     """The series of a plot of a figure preset, as (method, position, label,
-    points) tuples, where position is the index of the bit width in
-    "series_bits" (None for presets without it), and points are (n, value)
-    pairs. Series without points are omitted."""
-    col = fig_cfg["column"]
+    linestyle, points) tuples, where position is the index of the bit width
+    in "series_bits" (None for presets without it), and points are (n,
+    value) pairs. Series without points are omitted.
+
+    A preset has either a "column", or a list of "columns", that is, of
+    (column, label suffix, line style) triples, which yields a series per
+    method and column."""
     series_bits = fig_cfg.get("series_bits")
     result = []
     for method_name in fig_cfg["methods"]:
@@ -1824,7 +2150,10 @@ def _figure_series(fig_cfg, bits, args):
         tool_for_parse = _parse_tool(cfg["tool"])
         label = fig_cfg.get("labels", {}).get(method_name, cfg["label"])
         widths = list(enumerate(series_bits)) if series_bits else [(None, bits)]
-        for pos, b in widths:
+        columns = fig_cfg.get("columns") or \
+            [(fig_cfg["column"], "", cfg.get("linestyle", "-"))]
+        for (pos, b), (col, suffix, linestyle) in itertools.product(widths,
+                                                                    columns):
             points = []
             for log2_n in range(MIN_LOG2, effective_max_log2(args, cfg, b) + 1):
                 n = 1 << log2_n
@@ -1832,9 +2161,10 @@ def _figure_series(fig_cfg, bits, args):
                 if val is not None:
                     points.append((n, val))
             if points:
+                name = label + suffix
                 result.append((method_name, pos,
-                               label if pos is None else f"{label}, {b} bits",
-                               points))
+                               name if pos is None else f"{name}, {b} bits",
+                               linestyle, points))
     return result
 
 
@@ -1865,9 +2195,19 @@ def _figure_styles(figure_name):
         if fig_cfg.get("style_group", name) != group:
             continue
         for method_name in fig_cfg["methods"]:
-            if method_name not in methods:
+            # Methods with "style_as" borrow the style of another method
+            if method_name not in methods and \
+                    "style_as" not in METHODS[method_name]:
                 methods.append(method_name)
-    return {method_name: i for i, method_name in enumerate(methods)}
+    styles = {method_name: i for i, method_name in enumerate(methods)}
+    for name, fig_cfg in FIGURES.items():
+        if fig_cfg.get("style_group", name) != group:
+            continue
+        for method_name in fig_cfg["methods"]:
+            other = METHODS[method_name].get("style_as")
+            if other is not None:
+                styles[method_name] = styles[other]
+    return styles
 
 
 def _plot_one(figure_name, args, plt):
@@ -1883,13 +2223,13 @@ def _plot_one(figure_name, args, plt):
     for bits in _panel_bits(fig_cfg, bits_list):
         plt.figure(figsize=(8, 5.5))
         series = _figure_series(fig_cfg, bits, args)
-        for method_name, pos, label, points in series:
+        for method_name, pos, label, linestyle, points in series:
             si = styles[method_name] * widths + (pos or 0)
             # "Cn" is the n-th color of the color cycle (modulo its length)
             plt.plot([n for n, _ in points], [v for _, v in points],
                      color=f"C{si}",
                      marker=markers[si % len(markers)],
-                     linestyle="-",
+                     linestyle=linestyle,
                      label=label)
 
         title = fig_cfg["title"].format(bits=bits) if "{bits}" in fig_cfg["title"] else fig_cfg["title"]
@@ -2006,28 +2346,38 @@ def cmd_clean(args):
 TABLES = {
     "filter": {
         "rows": [
+            # BuRR queries stop at the first fingerprint bit that does not
+            # match, so they are measured both on negatives (the Weyl
+            # sequence used for all filters) and on keys
             ("BuRR", {"constr_seq": "BuRR-seq", "constr_par": "BuRR",
-                      "query_seq": "BuRR", "query_par": "BuRR"}),
+                      "query_seq": None, "query_par": None}),
+            ("BuRR-neg", {"constr_seq": None, "constr_par": None,
+                          "query_seq": "BuRR", "query_par": "BuRR"}),
+            ("BuRR-pos", {"constr_seq": None, "constr_par": None,
+                          "query_seq": "BuRR-pos", "query_par": "BuRR",
+                          "query_par_col": "multi_pos"}),
             ("VFilter", {"constr_seq": "FuseAug3Shards-seq", "constr_par": "FuseAug3Shards",
                        "query_seq": "FuseAug3Shards", "query_par": "FuseAug3Shards"}),
+            # The parallel queries are BuRR-style (multi-bench), which pits
+            # VFilter against BuRR only
             ("MWHC", {"constr_seq": None, "constr_par": "Mwhc3",
-                      "query_seq": "Mwhc3", "query_par": "Mwhc3"}),
+                      "query_seq": "Mwhc3", "query_par": None}),
             # The sharding ablation: VFilter's construction, laid out as HEM
             # would lay it out. Everything but the offset/seed indirection is
             # held fixed, so the gap against the VFilter row is that
             # indirection. Construction is single-threaded here (no augmented
             # peeling, no parallel builder), so we report only queries.
             ("HEM(Fuse)", {"constr_seq": None, "constr_par": None,
-                           "query_seq": "HemVFilter", "query_par": "HemVFilter"}),
+                           "query_seq": "HemVFilter", "query_par": None}),
             # HEM as actually shipped: Sux4J's GOV3, queried by the C code
             # distributed with Sux4J. Its much finer sharding is forced by
             # lazy Gaussian elimination, so its offset array is far larger.
             ("HEM(GOV3)", {"constr_seq": None, "constr_par": None,
-                           "query_seq": "GOV3Function", "query_par": "GOV3Function"}),
+                           "query_seq": "GOV3Function", "query_par": None}),
             ("Fuse(64)", {"constr_seq": "Fuse3NoShards64", "constr_par": None,
-                          "query_seq": "Fuse3NoShards64", "query_par": "Fuse3NoShards64"}),
+                          "query_seq": "Fuse3NoShards64", "query_par": None}),
             ("Fuse(128)", {"constr_seq": "Fuse3NoShards128", "constr_par": None,
-                           "query_seq": "Fuse3NoShards128", "query_par": "Fuse3NoShards128"}),
+                           "query_seq": "Fuse3NoShards128", "query_par": None}),
         ],
         "bits_order": [8, 16, 32, 9, 17, 33],
         "sizes": [1 << 20, 1 << 30],
@@ -2110,24 +2460,33 @@ def _filter_constr_row(label, variants, bits_order, n, args):
 
 
 def _filter_query_row(label, variants, bits_order, n, args):
-    """Build one query row (sequential from bench.err, parallel from
-    parbench.err)."""
+    """Build one query row (sequential from bench.err, parallel from the
+    BuRR-style multi-bench results with n keys per structure, using the
+    column variants["query_par_col"], multi_neg by default); returns None if
+    the row has no query data at all."""
+    if variants["query_seq"] is None and variants["query_par"] is None:
+        return None
+
+    def value(text, tool):
+        v = parse_query(text, tool).get("query_min")
+        return "" if v is None else f"{v:.1f}"
+
     row = label
-    for mode in ("query_seq", "query_par"):
-        is_par = mode == "query_par"
-        prefix = "parbench" if is_par else "bench"
-        # parbench files summarize per-instance medians (no real Min);
-        # bench files have honest 5-repeat stats.  Use the meaningful
-        # column in each case.
-        col = "query_median" if is_par else "query_min"
-
-        def value(text, tool, col=col):
-            v = parse_query(text, tool).get(col)
-            return "" if v is None else f"{v:.1f}"
-
-        row += _filter_cells(variants[mode], bits_order,
-                             lambda bits, prefix=prefix: f"{prefix}.{n}.{bits}.err",
-                             value, args.results_dir)
+    row += _filter_cells(variants["query_seq"], bits_order,
+                         lambda bits: f"bench.{n}.{bits}.err",
+                         value, args.results_dir)
+    method_name = variants["query_par"]
+    if method_name is None:
+        row += " & ---" * len(bits_order)
+    else:
+        rdir = Path(args.results_dir) / method_name
+        col = variants.get("query_par_col", "multi_neg")
+        vals = [_multi_value(rdir, n, bits, col) for bits in bits_order]
+        if all(v is None for v in vals):
+            row += " & ---" * len(bits_order)
+        else:
+            row += "".join(" & " if v is None else f" & {v:.1f}"
+                           for v in vals)
     return row + r" \\"
 
 
@@ -2612,6 +2971,46 @@ def make_parser():
     pq.add_argument("--jobs", type=int, default=DEFAULT_PAR_JOBS,
                     help=f"Number of parallel instances (default: {DEFAULT_PAR_JOBS})")
 
+    # --- multi-bench ---
+    mb = sub.add_parser("multi-bench",
+                        help="BuRR-style parallel queries on many structures")
+    mb.add_argument("--method", default="FuseAug3Shards,BuRR",
+                    help="Method name(s), comma-separated, or 'all' "
+                         "(default: FuseAug3Shards,BuRR)")
+    mb.add_argument("--bits", default="all",
+                    help="Bit widths: 'all' (default), 'even', 'odd', or "
+                         "comma-separated ints")
+    mb.add_argument("--total-log2", type=int, default=MULTI_TOTAL_LOG2,
+                    help="Log2 of the total number of keys: each size n is "
+                         "tested on 2^total-log2 / n structures (default: "
+                         f"{MULTI_TOTAL_LOG2}; figures and tables use only "
+                         "this default)")
+    mb.add_argument("--min-log2", type=int, default=MIN_LOG2,
+                    help=f"Log2 of the smallest size (default: {MIN_LOG2})")
+    mb.add_argument("--max-log2", type=int, default=None,
+                    help="Log2 of the largest size (default: --total-log2)")
+    mb.add_argument("--keys", type=int, default=None,
+                    help="Test only --filters structures of this many keys "
+                         "(e.g., 10^7 and 1280, as in the BuRR paper)")
+    mb.add_argument("--filters", type=int, default=1280,
+                    help="Number of structures with --keys (default: 1280)")
+    mb.add_argument("--queries", type=int, default=QUERY_KEYS,
+                    help=f"Queries per thread (default: {QUERY_KEYS})")
+    mb.add_argument("--query-threads", default=str(os.cpu_count()),
+                    help="Comma-separated query thread counts "
+                         f"(default: {os.cpu_count()})")
+    mb.add_argument("--build-threads", type=int, default=os.cpu_count(),
+                    help=f"Construction threads (default: {os.cpu_count()})")
+    mb.add_argument("--burr-eps", choices=["bench", "parbench"],
+                    default="bench",
+                    help="BuRR overload ε: that of the bench binary used for"
+                         " all other BuRR results (-4/L for L > 32, default)"
+                         " or the default of parbench.cpp (-3/L)")
+    mb.add_argument("--report", action="store_true",
+                    help="Only print the TSV table of existing results")
+    mb.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
+    mb.add_argument("--force", action="store_true", default=argparse.SUPPRESS)
+
     # --- report ---
     r = sub.add_parser("report", help="Print TSV report of results")
     add_common(r)
@@ -2655,6 +3054,7 @@ def main():
     dispatch = {
         "bench": cmd_bench,
         "par-bench": cmd_par_bench,
+        "multi-bench": cmd_multi_bench,
         "report": cmd_report,
         "plot": cmd_plot,
         "table": cmd_table,

@@ -198,6 +198,22 @@ METHODS = {
         "burr_threads": PARALLEL,
         "max_log2": 33,
     },
+    # BuRR filter queries stop at the first fingerprint bit that does not
+    # match, so on negative queries (the Weyl sequence used for all
+    # filters) they are much cheaper than on keys, which must check all
+    # bits; positive queries do essentially the work of a BuRR static
+    # function. Same structure as BuRR, but queried on keys of the filter.
+    "BuRR-pos": {
+        "tool": "burr",
+        "label": "BuRR-pos",
+        # benchpos is ribbon.cpp compiled with -DRIBBON_POSITIVE_QUERIES
+        "burr_binary": "benchpos",
+        "burr_flags": ["-L", "64", "-2", "-I"],
+        "burr_threads": PARALLEL,
+        "max_log2": 33,
+        "style_as": "BuRR",
+        "linestyle": "--",
+    },
     "BuRR-seq": {
         "tool": "burr",
         "label": "BuRR(seq)",
@@ -477,6 +493,8 @@ FIGURES = {
         "title": "Filter Queries ({bits} bits)",
         "style_group": "filter",
         "legend_loc": "upper left",
+        # BuRR queries are measured on negatives and on keys (BuRR-pos)
+        "labels": {"BuRR": "BuRR-neg"},
         "methods": [
             "Fuse3NoShards64",
             "Fuse3NoShards128",
@@ -484,23 +502,24 @@ FIGURES = {
             "HemVFilter",
             "Mwhc3",
             "BuRR",
+            "BuRR-pos",
         ],
         "column": "query_min",
         "ylabel": "ns/key",
     },
-    "filter-parquery": {
+    # BuRR-style parallel queries (multi-bench): 2^33 / n structures of n
+    # keys, queried at random by all threads; a series for negative
+    # queries, and a dashed one for positive queries
+    "filter-multiquery": {
         "title": "Filter Parallel Queries ({bits} bits)",
         "style_group": "filter",
         "legend_loc": "upper left",
+        "labels": {"FuseAug3Shards": "VFilter"},
         "methods": [
-            "Fuse3NoShards64",
-            "Fuse3NoShards128",
             "FuseAug3Shards",
-            "HemVFilter",
-            "Mwhc3",
             "BuRR",
         ],
-        "column": "parbench_med",
+        "columns": [("multi_neg", "-neg", "-"), ("multi_pos", "-pos", "--")],
         "ylabel": "ns/key",
     },
     # --- Sharded vs unsharded sequential construction ---

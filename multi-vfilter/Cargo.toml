@@ -1,0 +1,22 @@
+# BuRR-style parallel query benchmark: many small filters in one process,
+# queried at random by all threads, as in parbench.cpp of BuRR.
+[package]
+name = "multi-vfilter"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+sux = { path = "../sux-rs", features = ["rayon", "cli", "mwhc"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dsi-progress-logger = "0.8.10"
+mem_dbg = "0.4.1"
+
+[profile.bench]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = true
