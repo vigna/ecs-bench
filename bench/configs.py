@@ -654,6 +654,8 @@ FIGURES = {
         "title": "PHastR vs VFunc Queries",
         "style_group": "phast",
         "methods": ["PHastR", "VFunc"],
+        # VFunc drawn again, dashed, from the results of --vec-results-dir
+        "vec_methods": {"VFunc": "VFunc(Fuse+Aug)-vec"},
         "column": "query_min",
         "ylabel": "ns/key",
     },
