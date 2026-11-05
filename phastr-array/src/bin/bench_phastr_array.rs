@@ -1,9 +1,3 @@
-/*
- * SPDX-FileCopyrightText: 2023 Sebastiano Vigna
- *
- * SPDX-License-Identifier: Apache-2.0 OR MIT
- */
-
 //! Benchmarks a static function made of a [`PHastR`] minimal perfect hash
 //! function and an array of values on 64-bit integer keys, for comparison
 //! with [`VFunc`](sux::func::VFunc).
@@ -17,11 +11,13 @@ use anyhow::Result;
 use clap::Parser;
 use dsi_progress_logger::no_logging;
 use mem_dbg::{MemSize, SizeFlags};
-use sux::bits::BitFieldVec;
+use rayon::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use sux::bits::{AtomicBitFieldVec, BitFieldVec};
 use sux::cli::{INCR, bench, init_env_logger};
 use sux::func::{PHastR, PHastRBuilder};
+use sux::traits::AtomicBitFieldSlice;
 use sux::utils::FromCloneableIntoIterator;
-use value_traits::slices::*;
 
 #[derive(Parser, Debug)]
 #[command(about = "Benchmarks PHastR + array with 64-bit integers", long_about = None)]
@@ -59,11 +55,19 @@ fn main() -> Result<()> {
         )
     })?;
 
-    // Unaligned reads need a padding word at the end of the vector
+    // Unaligned reads need a padding word at the end of the vector. We fill
+    // it in parallel through an atomic view, as distinct values may share a
+    // word.
     let mut output =
         BitFieldVec::<Box<[usize]>>::new_padded((args.n - 1).ilog2() as usize + 1, args.n);
-    for i in 0..n {
-        output.set_value(func.get(i), i as usize);
+    {
+        let atomic: AtomicBitFieldVec<&mut [AtomicUsize]> =
+            BitFieldVec::<&mut [usize]>::from(&mut output).try_into()?;
+        pool.install(|| {
+            (0..n).into_par_iter().for_each(|i| {
+                atomic.set_atomic(func.get(i), i as usize, Ordering::Relaxed);
+            })
+        });
     }
 
     let elapsed = start.elapsed();

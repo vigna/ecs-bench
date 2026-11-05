@@ -2,36 +2,39 @@
 """
 Benchmark runner for the ε-cost sharding paper.
 
-Orchestrates build, query, and reporting for sux-rs (VFilter/VFunc/CompVFunc),
-BuRR (bumped ribbon), and CSF (compressed static functions via BuRR-VL)
-benchmarks.  Results are stored as individual files under
-results/<method>/, one per (n, bits) data point, enabling interrupt/resume
-without losing partial progress.
+Orchestrates build, query, and reporting for sux-rs (VFilter, VFunc,
+CompVFunc, LcpMmphf, Lcp2Mmphf), the HEM-sharded VFilter of hem-vfilter/,
+PHastR + array (phastr-array/), BuRR (bumped ribbon), CSF (compressed static
+functions via BuRR-VL), LeMonHash (MMPHF-Experiments/), and Sux4J GOV3 (Java
+build, C query) benchmarks, plus the BuRR-style parallel query benchmark
+(multi-vfilter/ and BuRR's parbench).  Results are stored as individual files
+under results/<method>/, one per (n, bits) data point, enabling
+interrupt/resume without losing partial progress.
 
 Usage examples:
 
     # Smoke test: one method, 8 bits, small sizes
-    python bench/run.py bench --method FuseAug3Shards --bits 8 --max-log2 22
+    python3 bench/run.py bench --method FuseAug3Shards --bits 8 --max-log2 22
 
     # Full run with CPU pinning
-    python bench/run.py bench --method all --bits all \\
-        --pin "chrt -f 99 taskset -c 2"
+    python3 bench/run.py bench --method all --bits all \\
+        --pin "taskset -c 2"
 
     # Report to stdout
-    python bench/run.py report --method FuseAug3Shards --bits 8
+    python3 bench/run.py report --method FuseAug3Shards --bits 8
 
     # BuRR-style parallel query benchmark (2^33 / n structures of n keys
     # queried at random by all hardware threads)
-    python bench/run.py multi-bench --method FuseAug3Shards,BuRR --bits 8
+    python3 bench/run.py multi-bench --method FuseAug3Shards,BuRR --bits 8
 
     # Generate paper figures
-    python bench/run.py plot --figure filter-build --bits even
+    python3 bench/run.py plot --figure filter-build --bits even
 
     # Show what has been completed
-    python bench/run.py status
+    python3 bench/run.py status
 
 Environment variables:
-    BENCH_PIN     Default CPU-pinning prefix, e.g. "chrt -f 99 taskset -c 2"
+    BENCH_PIN     Default CPU-pinning prefix, e.g. "taskset -c 2"
     SUX_DIR       Path to sux-rs repo   (default: sux-rs/ submodule)
     BURR_DIR      Path to BuRR repo     (default: BuRR/ submodule)
     RESULTS_DIR   Path to results dir   (default: ./results)
@@ -47,7 +50,7 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Make sibling modules importable when invoked as "python bench/run.py".
+# Make sibling modules importable when invoked as "python3 bench/run.py".
 # ---------------------------------------------------------------------------
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from configs import (  # noqa: E402
@@ -231,10 +234,11 @@ def size_check(outfile, n, text):
 
 
 def ensure_sux_built(sux_dir, need_comp_vfunc=False):
-    """Compile the sux-rs binaries if they are not already present.
+    """Compile the sux-rs binaries.
 
-    Runs cargo build with the bench profile and the feature set needed
-    for all current benchmarks.
+    Always runs cargo build (which rebuilds only what is out of date) with
+    the bench profile and the feature set needed for all current
+    benchmarks.
     """
     sux = Path(sux_dir)
     print(f"Building sux-rs binaries in {sux}…")
@@ -736,7 +740,7 @@ def run_cmd(cmd, pin=None, dry_run=False):
 
     Args:
         cmd:     list of command-line tokens.
-        pin:     optional CPU-pinning prefix, e.g. "chrt -f 99 taskset -c 2".
+        pin:     optional CPU-pinning prefix, e.g. "taskset -c 2".
                  Parsed with shlex.split and prepended to cmd.
         dry_run: if True, print the command but don't execute.
 
@@ -793,33 +797,37 @@ def cmd_bench(args):
     lemonhash_str_ok = True
     java_ok = True
 
-    if sux_needed or comp_vfunc_needed:
-        ensure_sux_built(args.sux_dir, need_comp_vfunc=comp_vfunc_needed)
-    if mmphf_needed or mmphf_str_needed:
-        ensure_mmphf_built(args.sux_dir)
-    if burr_needed:
-        burr_ok = ensure_burr_built(args.burr_dir, bits_list,
-                                    burr_targets(methods))
-    if csf_needed:
-        csf_ok = ensure_csf_built()
-    if lemonhash_needed:
-        lemonhash_ok = ensure_lemonhash_built()
-    if lemonhash_str_needed:
-        lemonhash_str_ok = ensure_lemonhash_str_built()
-    if any(METHODS[m]["tool"] == "hem" for m in methods):
-        if not ensure_hem_built():
-            methods = [m for m in methods if METHODS[m]["tool"] != "hem"]
-    if any(METHODS[m]["tool"] == "phastr" for m in methods):
-        if not ensure_phastr_array_built():
-            methods = [m for m in methods if METHODS[m]["tool"] != "phastr"]
+    # A dry run only prints commands, so, as in multi-bench, it builds nothing
+    # and assumes that all binaries are available.
+    if not args.dry_run:
+        if sux_needed or comp_vfunc_needed:
+            ensure_sux_built(args.sux_dir, need_comp_vfunc=comp_vfunc_needed)
+        if mmphf_needed or mmphf_str_needed:
+            ensure_mmphf_built(args.sux_dir)
+        if burr_needed:
+            burr_ok = ensure_burr_built(args.burr_dir, bits_list,
+                                        burr_targets(methods))
+        if csf_needed:
+            csf_ok = ensure_csf_built()
+        if lemonhash_needed:
+            lemonhash_ok = ensure_lemonhash_built()
+        if lemonhash_str_needed:
+            lemonhash_str_ok = ensure_lemonhash_str_built()
+        if any(METHODS[m]["tool"] == "hem" for m in methods):
+            if not ensure_hem_built():
+                methods = [m for m in methods if METHODS[m]["tool"] != "hem"]
+        if any(METHODS[m]["tool"] == "phastr" for m in methods):
+            if not ensure_phastr_array_built():
+                methods = [m for m in methods
+                           if METHODS[m]["tool"] != "phastr"]
 
-    if java_needed:
-        java_ok = ensure_java_built()
-        if java_ok:
-            java_types = {METHODS[m].get("java_type") for m in methods
-                          if METHODS[m]["tool"] == "java"}
-            filter_bits = bits_list if "GOV3Function" in java_types else []
-            java_ok = ensure_sux4j_c_built(filter_bits)
+        if java_needed:
+            java_ok = ensure_java_built()
+            if java_ok:
+                java_types = {METHODS[m].get("java_type") for m in methods
+                              if METHODS[m]["tool"] == "java"}
+                filter_bits = bits_list if "GOV3Function" in java_types else []
+                java_ok = ensure_sux4j_c_built(filter_bits)
 
     # --- String-dataset methods (iterate over files in data/) ---
     datasets = list_datasets()
@@ -1037,8 +1045,9 @@ def _bench_comp_vfunc(cfg, method_name, n, log2_n, rdir, args):
 def _bench_phastr(cfg, method_name, n, log2_n, rdir, args):
     """Run a PHastR + array benchmark: build and query in one invocation.
 
-    bench_phastr_array <n> <query_keys> <threads> --repeats 5
-    Output (construction + queries) goes to stderr.
+    bench_phastr_array <n> <query_keys> <threads>
+    (five repetitions, the default of the binary). Output (construction +
+    queries) goes to stderr.
     """
     cmd = [str(phastr_array_target_dir() / "release" / "bench_phastr_array")]
     cmd += [str(n), str(cfg.get("query_keys", QUERY_KEYS))]
@@ -1065,8 +1074,9 @@ def _bench_phastr(cfg, method_name, n, log2_n, rdir, args):
 def _bench_mmphf(cfg, method_name, n, log2_n, rdir, args):
     """Run a LcpMmphf/Lcp2Mmphf benchmark: build, then query.
 
-    Build:  lcp_mmphf -n <N> --unaligned [--threads 1] [-2] <outfile>
-    Query:  bench_lcp_mmphf <n> <outfile> --unaligned [-2] --repeats 5
+    Build:  lcp_mmphf -n <n> [--unaligned] --threads 1 [-2] <outfile>
+    Query:  bench_lcp_mmphf <query_keys> <outfile> [--unaligned] [-2]
+            --repeats 5
     """
     target = sux_target_dir(args.sux_dir)
     ddir = data_dir(args.results_dir, method_name)
@@ -1811,7 +1821,7 @@ def cmd_report(args):
 
 
 def _fmt(v):
-    """Format a numeric value for TSV, leaving empty string for None."""
+    """Format a numeric value for the report, leaving empty string for None."""
     if v is None or v == "":
         return ""
     return f"{v:.2f}" if isinstance(v, float) else str(v)
@@ -2124,11 +2134,21 @@ def cmd_clean(args):
 # =====================================================================
 
 
-# Table presets.  Each maps a table name to:
-#   - "methods": ordered list of method names (rows)
-#   - "bits_order": ordered list of bit widths (column groups)
-#   - "sizes": list of n values (one table per size)
-#   - "columns": list of (column_key, header) for each half
+# Table presets, each rendered by its own function (see cmd_table). The keys
+# are:
+#   - "rows": ordered list of (label, methods) rows; in "filter", methods is a
+#     dictionary mapping "constr_seq", "constr_par", "query_seq" and
+#     "query_par" to a method name or None (and, optionally, "query_par_col"
+#     to the multi-bench column, multi_neg by default); in "comp" and
+#     "java-comp", a list with a method for each distribution; in "java", a
+#     dictionary mapping "query" to a method name;
+#   - "methods": in "mmphf" and "mmphf-str", ordered list of (method, label)
+#     rows;
+#   - "bits_order": ordered list of bit widths (columns);
+#   - "dist_labels": headers of the column groups of the distributions;
+#   - "sizes": list of n values (a block or a table per size; in "mmphf", a
+#     column group per size). "mmphf-str" has a column group per dataset
+#     found in the results instead.
 
 TABLES = {
     "filter": {
@@ -2715,11 +2735,12 @@ def make_parser():
     p.add_argument("--results-dir", default=os.environ.get("RESULTS_DIR", "results"),
                    help="Path to results directory")
     p.add_argument("--pin", default=os.environ.get("BENCH_PIN"),
-                   help="CPU-pinning prefix, e.g. 'chrt -f 99 taskset -c 2'")
+                   help="CPU-pinning prefix, e.g. 'taskset -c 2' (ignored by "
+                        "multi-bench)")
     p.add_argument("--threads", type=int, default=None,
                    help="Thread count for parallel builds (default: "
                         f"{DEFAULT_THREADS}); single-threaded methods "
-                        "are not affected")
+                        "are not affected (ignored by multi-bench)")
     p.add_argument("--dry-run", action="store_true",
                    help="Print commands without executing")
     p.add_argument("--force", action="store_true",
@@ -2754,7 +2775,12 @@ def make_parser():
 
     # --- multi-bench ---
     mb = sub.add_parser("multi-bench",
-                        help="BuRR-style parallel queries on many structures")
+                        help="BuRR-style parallel queries on many structures",
+                        description="BuRR-style parallel queries on many "
+                                    "structures. The global --pin and "
+                                    "--threads are ignored: runs are never "
+                                    "pinned, and thread counts are set by "
+                                    "--build-threads and --query-threads.")
     mb.add_argument("--method", default="FuseAug3Shards,BuRR",
                     help="Method name(s), comma-separated, or 'all' "
                          "(default: FuseAug3Shards,BuRR)")
@@ -2793,7 +2819,8 @@ def make_parser():
     mb.add_argument("--force", action="store_true", default=argparse.SUPPRESS)
 
     # --- report ---
-    r = sub.add_parser("report", help="Print TSV report of results")
+    r = sub.add_parser("report",
+                       help="Print a space-aligned report of results")
     add_common(r)
 
     # --- plot ---
@@ -2807,6 +2834,7 @@ def make_parser():
                          "If omitted, only the per-method cap in configs.py applies.")
     pl.add_argument("--output-dir", default="figs",
                     help="Output directory for PDFs (default: figs)")
+    pl.add_argument("--results-dir", default=argparse.SUPPRESS)
 
     # --- table ---
     tb = sub.add_parser("table", help="Print LaTeX tables")

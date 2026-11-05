@@ -10,7 +10,7 @@ Each entry in METHODS specifies:
     CompVFunc), "phastr" (PHastR + array), "mmphf" (monotone MMPHF, integer
     keys), "mmphf-str" (monotone MMPHF, string keys), "lemonhash"
     (LeMonHash, integer keys), "lemonhash-str" (LeMonHash, string
-    keys), "java" (Sux4J GOV3)
+    keys), "java" (Sux4J GOV3), "hem" (HEM-sharded VFilter, hem-vfilter/)
 
   - How to build the structure and how to query it - Default size
     ranges and special flags
@@ -33,8 +33,9 @@ ALL_BITS = sorted(EVEN_BITS + ODD_BITS)
 # Starting size exponent: 2^20 ≈ 1M keys.
 MIN_LOG2 = 20
 
-# Default number of query operations per benchmark run.  Monotone MMPHF
-# and LeMonHash methods override this via per-method "query_keys" configs.
+# Default number of query operations per benchmark run.  The CSF methods
+# (BuRR-CSF) and LeMonHashStr override this via per-method "query_keys"
+# configs.
 QUERY_KEYS = 100_000_000
 
 import os
@@ -133,8 +134,10 @@ METHODS = {
         "label": "VFilter(Fuse+Aug,full)",
         # Same structure, but shards are solved using the full 128-bit
         # signatures instead of 64-bit local signatures, as functions must do
-        # beyond about fifteen billion keys. Not in the paper: it provides
-        # evidence that queries cost the same.
+        # beyond ten billion keys (shard_edge::MAX_LOCAL_SIG_FUNC_KEYS since
+        # sux 0.15.4). Not in the figures or tables, but the paper uses its
+        # results to state that full signatures make construction about 20%
+        # slower, and that queries cost the same.
         "shard_edge": "fuse-aug3-full-sigs",
         "build_bin": "vfilter",
         "bench_bin": "bench_vfilter",
@@ -190,7 +193,8 @@ METHODS = {
     # -----------------------------------------------------------------
     #
     # BuRR is a C++ project. The bit width is compiled into the binary
-    # (e.g. ribbon8, ribbon16).  All runs use:
+    # (e.g. bench8, benchpos16, and parbench32, used by multi-bench).  All
+    # runs use:
     #   -L 64   ribbon width 64
     #   -2      two-bit threshold compression
     #   -I      interleaved solution storage
@@ -241,7 +245,7 @@ METHODS = {
     # prefix-free code.  Bits-agnostic (bits/key is a result metric).
     #
     # Build:  bench_csf -n <n> --geometric --coder huffman -Q -w <file>
-    # Query:  bench_csf -n <n> --coder huffman -r <file>
+    # Query:  bench_csf -n <n> --coder huffman --queries <query_keys> -r <file>
     "CSF-Geo": {
         "tool": "csf",
         "label": "BuRR-CSF(geo)",
@@ -277,8 +281,9 @@ METHODS = {
     # bench_comp_vfunc.  Bits-agnostic (bits/key is a result metric).
     # Uses bits=0 sentinel.
     #
-    # Build:  comp_vfunc -n <n> --geometric --shard-edge fuse3-shards <outfile>
-    # Query:  bench_comp_vfunc <n> <outfile> --shard-edge fuse3-shards
+    # Build:  comp_vfunc -n <n> --geometric --shard-edge fuse3-shards
+    #             --huffman-entropy-threshold 1 --threads 1 <outfile>
+    # Query:  bench_comp_vfunc <query_keys> <outfile> --shard-edge fuse3-shards
     "CompVFunc-Geo": {
         "tool": "comp-vfunc",
         "label": "CompVFunc(geo)",
@@ -331,7 +336,9 @@ METHODS = {
         "tool": "sux",
         "label": "VFunc(Fuse+Aug,full)",
         # Same as VFunc, but with full signatures (see FuseAug3FullSigs).
-        # Not in the paper. Unpinned queries, as for VFunc.
+        # Not in the figures or tables, but the paper uses its results to
+        # state that full signatures make construction about 10% slower, and
+        # that queries cost the same. Unpinned queries, as for VFunc.
         "shard_edge": "fuse-aug3-full-sigs",
         "build_bin": "vfunc",
         "bench_bin": "bench_vfunc",
@@ -367,8 +374,11 @@ METHODS = {
     # All use sorted random 64-bit keys (same generation algorithm).
     # Bits-agnostic (bits/key is a result metric).
     #
-    # LcpMmphf/Lcp2Mmphf: use bench_lcp_mmphf from sux-rs.
-    #   Run:  bench_lcp_mmphf <n> <query_keys> <threads>
+    # LcpMmphf/Lcp2Mmphf: built with lcp_mmphf and queried with
+    # bench_lcp_mmphf, both from sux-rs (-2 selects Lcp2Mmphf).
+    #   Build:  lcp_mmphf -n <n> [--unaligned] --threads 1 [-2] <outfile>
+    #   Query:  bench_lcp_mmphf <query_keys> <outfile> [--unaligned] [-2]
+    #               --repeats 5
     #
     # LeMonHash: uses bench_lemonhash (C++, cmake-built).
     #   Run:  bench_lemonhash <n> <query_keys> <repeats>
@@ -436,6 +446,8 @@ METHODS = {
     # implementations is not affected by the language.
     "GOV3Function": {
         "tool": "java",
+        # No figure uses this label: the filter table labels the method
+        # HEM(GOV3), as the paper does, and the java table GOV3.
         "label": "HEM/GOV3 (Sux4J)",
         "java_type": "GOV3Function",
         "sizes": [1 << 20, 1 << 30],

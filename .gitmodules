@@ -1,21 +1,21 @@
 [submodule "BuRR"]
 	path = BuRR
-	url = git@github.com:vigna/BuRR.git
+	url = https://github.com/vigna/BuRR.git
 	branch = parallel
 [submodule "sux-rs"]
 	path = sux-rs
-	url = git@github.com:vigna/sux-rs.git
+	url = https://github.com/vigna/sux-rs.git
 [submodule "BuRR-VL"]
 	path = BuRR-VL
-	url = git@github.com:vigna/BuRR.git
+	url = https://github.com/vigna/BuRR.git
 	branch = variable-bitlength
 [submodule "LearnedStaticFunction"]
 	path = LearnedStaticFunction
-	url = git@github.com:vigna/LearnedStaticFunction.git
+	url = https://github.com/vigna/LearnedStaticFunction.git
 	branch = main
 [submodule "MMPHF-Experiments"]
 	path = MMPHF-Experiments
-	url = git@github.com:vigna/MMPHF-Experiments.git
+	url = https://github.com/vigna/MMPHF-Experiments.git
 [submodule "Sux4J"]
 	path = Sux4J
-	url = git@github.com:vigna/Sux4J.git
+	url = https://github.com/vigna/Sux4J.git

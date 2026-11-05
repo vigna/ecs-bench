@@ -15,7 +15,7 @@ const INCR: usize = 0x9e37_79b9_7f4a_7c15;
 #[derive(Parser, Debug)]
 #[command(about = "Benchmarks queries on a HEM-sharded VFilter.", long_about = None)]
 struct Args {
-    /// The number of queries to perform.
+    /// The number of queries to perform (with --check, the number of keys).
     n: usize,
     /// The name of the serialized filter.
     filter: String,

@@ -1,6 +1,6 @@
 bench_csf
-ribbon_vlr
 bench_lemonhash
+bench_lemonhash_str
 results
 figs
 *.pdf

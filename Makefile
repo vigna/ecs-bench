@@ -1,7 +1,13 @@
-# Makefile for the BuRR-VL + coding benchmark (bench_csf).
+# Makefile for the C++ benchmarks of the harness: the BuRR-VL + coding
+# benchmark (bench_csf) and the LeMonHash benchmarks on integers and strings
+# (bench_lemonhash, bench_lemonhash_str, built through CMakeLists.txt). The
+# init target initializes the submodules and applies the LeMonHash patches.
+# bench/run.py invokes these targets on demand; it builds the BuRR binaries
+# through BuRR's own Makefile, and all other binaries with cargo, the Maven
+# wrapper, or cc.
 #
-# Uses BuRR-VL headers from the BuRR-VL/ submodule and coding headers
-# from LearnedStaticFunction/include/.  The BuRR-VL library needs tlx
+# bench_csf uses BuRR-VL headers from the BuRR-VL/ submodule and coding
+# headers from LearnedStaticFunction/include/.  The BuRR-VL library needs tlx
 # and ips2ra (pulled in as submodules of BuRR-VL/).
 
 CXX ?= c++
@@ -65,10 +71,15 @@ bench_lemonhash_str: bench_lemonhash_str.cpp
 clean:
 	rm -f bench_csf bench_lemonhash bench_lemonhash_str $(BURR_VL)/sorter.o
 	rm -rf $(BURR_VL)/tlx/build build
-	rm -f BuRR/bench[0-9]* BuRR/ribbon[0-9]* BuRR/debug[0-9]* \
-	      BuRR/parbench[0-9]* BuRR/parrun[0-9]* BuRR/pardbg[0-9]* \
-	      BuRR/sorter.o BuRR/tests
+	rm -f BuRR/bench[0-9]* BuRR/benchpos[0-9]* BuRR/ribbon[0-9]* \
+	      BuRR/debug[0-9]* BuRR/parbench[0-9]* BuRR/parrun[0-9]* \
+	      BuRR/pardbg[0-9]* BuRR/sorter.o BuRR/tests
 	rm -rf BuRR/tlx/build
+	rm -f Sux4J/c/test_sf3_filter[0-9]* Sux4J/c/test_csf3_uint64
+	rm -rf java/target
 	cd sux-rs && cargo clean 2>/dev/null || true
+	cd hem-vfilter && cargo clean 2>/dev/null || true
+	cd multi-vfilter && cargo clean 2>/dev/null || true
+	cd phastr-array && cargo clean 2>/dev/null || true
 
 .PHONY: all init clean
