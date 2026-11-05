@@ -228,6 +228,20 @@ METHODS = {
         "style_as": "BuRR",
         "linestyle": "--",
     },
+    # Same structure as BuRR, queried as a static function on keys: the
+    # filter query without the comparison of each result bit with the
+    # fingerprint (InterleavedFunctionQuery).
+    "BuRR-func": {
+        "tool": "burr",
+        "label": "BuRR-func",
+        # benchfunc is ribbon.cpp compiled with -DRIBBON_FUNCTION_QUERIES
+        "burr_binary": "benchfunc",
+        "burr_flags": ["-L", "64", "-2", "-I"],
+        "burr_threads": PARALLEL,
+        "max_log2": 33,
+        "style_as": "BuRR",
+        "linestyle": ":",
+    },
     "BuRR-seq": {
         "tool": "burr",
         "label": "BuRR(seq)",
@@ -530,7 +544,8 @@ FIGURES = {
         "title": "Filter Queries ({bits} bits)",
         "style_group": "filter",
         "legend_loc": "upper left",
-        # BuRR queries are measured on negatives and on keys (BuRR-pos)
+        # BuRR queries are measured on negatives, on keys (BuRR-pos), and on
+        # keys as a static function (BuRR-func)
         "labels": {"BuRR": "BuRR-neg"},
         "methods": [
             "Fuse3NoShards64",
@@ -540,7 +555,11 @@ FIGURES = {
             "Mwhc3",
             "BuRR",
             "BuRR-pos",
+            "BuRR-func",
         ],
+        # Methods drawn again, dashed, from the results of --vec-results-dir
+        # (a campaign with auto-vectorization enabled)
+        "vec_methods": {"FuseAug3Shards": "VFilter(Fuse+Aug)-vec"},
         "column": "query_min",
         "ylabel": "ns/key",
     },

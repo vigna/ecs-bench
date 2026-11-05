@@ -1967,6 +1967,26 @@ def _figure_series(fig_cfg, bits, args):
                 result.append((method_name, pos,
                                name if pos is None else f"{name}, {b} bits",
                                linestyle, points))
+    # Methods drawn again from the results of a vectorized campaign, with
+    # the same style but dashed
+    vec_dir = getattr(args, "vec_results_dir", None)
+    for method_name, vec_label in fig_cfg.get("vec_methods", {}).items():
+        cfg = METHODS.get(method_name)
+        if vec_dir is None or cfg is None:
+            continue
+        rdir = Path(vec_dir) / method_name
+        if not rdir.exists():
+            continue
+        tool_for_parse = _parse_tool(cfg["tool"])
+        col = fig_cfg["column"]
+        points = []
+        for log2_n in range(MIN_LOG2, effective_max_log2(args, cfg, bits) + 1):
+            n = 1 << log2_n
+            val = _figure_value(rdir, n, bits, col, tool_for_parse)
+            if val is not None:
+                points.append((n, val))
+        if points:
+            result.append((method_name, None, vec_label, "--", points))
     return result
 
 
@@ -2734,6 +2754,10 @@ def make_parser():
                    help="Path to BuRR repository (default: BuRR/ submodule)")
     p.add_argument("--results-dir", default=os.environ.get("RESULTS_DIR", "results"),
                    help="Path to results directory")
+    p.add_argument("--vec-results-dir", default=None,
+                   help="Path to the results directory of a campaign with "
+                        "auto-vectorization enabled, used by plot for the "
+                        "methods listed in the \"vec_methods\" of a figure")
     p.add_argument("--pin", default=os.environ.get("BENCH_PIN"),
                    help="CPU-pinning prefix, e.g. 'taskset -c 2' (ignored by "
                         "multi-bench)")
