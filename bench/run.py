@@ -42,6 +42,7 @@ Environment variables:
 
 import argparse
 import itertools
+import math
 import os
 import shlex
 import shutil
@@ -1467,9 +1468,21 @@ def ensure_burr_parbench_built(burr_dir, bits_values):
             sys.exit(f"BuRR make parbench failed for RIBBON_BITS={bits}")
 
 
+def multi_func(cfg):
+    """The --func argument of multi_vfilter for the static functions that
+    multi-bench can run (VFunc and PHastR + array), or None."""
+    if cfg["tool"] == "phastr":
+        return "phastr"
+    if cfg["tool"] == "sux" and cfg.get("build_bin") == "vfunc" and \
+            cfg.get("shard_edge") == "fuse-aug3-shards":
+        return "vfunc"
+    return None
+
+
 def multi_methods(arg):
     """Methods that multi-bench can run: VFilter with the shard edges
-    supported by multi_vfilter, and BuRR."""
+    supported by multi_vfilter, BuRR, and the static functions of
+    multi_func."""
     names = list(METHODS.keys()) if arg == "all" else resolve_methods(arg)
     ok = []
     for name in names:
@@ -1486,7 +1499,7 @@ def multi_methods(arg):
         if cfg["tool"] == "sux" and cfg.get("build_bin") == "vfilter" and \
                 cfg.get("shard_edge") in MULTI_SHARD_EDGES:
             ok.append(name)
-        elif cfg["tool"] == "burr":
+        elif cfg["tool"] == "burr" or multi_func(cfg) is not None:
             ok.append(name)
         elif arg != "all":
             sys.exit(f"multi-bench does not support {name}")
@@ -1520,7 +1533,13 @@ def burr_slots(cfg, n, burr_eps):
 
 def multi_cmd(cfg, n, bits, k, q, t, b, args):
     """Assemble the command line of one multi-bench run."""
-    if cfg["tool"] == "sux":
+    func = multi_func(cfg)
+    if func is not None:
+        # Functions have only positive queries and are bits-agnostic
+        cmd = [str(multi_target_dir() / "release" / "multi-vfilter")]
+        cmd += ["-n", str(n), "-k", str(k), "-q", str(q),
+                "-t", str(t), "-b", str(b), "--bits", "0", "--func", func]
+    elif cfg["tool"] == "sux":
         cmd = [str(multi_target_dir() / "release" / "multi-vfilter")]
         cmd += ["-n", str(n), "-k", str(k), "-q", str(q),
                 "-t", str(t), "-b", str(b)]
@@ -1594,6 +1613,11 @@ def multi_report(methods, bits_list, threads_list, configs, q, b, args):
                                              configs):
         for method_name in methods:
             cfg = METHODS[method_name]
+            if multi_func(cfg) is not None:
+                # Functions are bits-agnostic: reported once, as bits 0
+                if bits != bits_list[0]:
+                    continue
+                bits = 0
             path = multi_result_path(args.results_dir, method_name, cfg,
                                      n, bits, k, t, q, b, args)
             if not path.exists():
@@ -1607,10 +1631,10 @@ def multi_report(methods, bits_list, threads_list, configs, q, b, args):
                 label += f"(eps=-{f}/{width})"
             print("\t".join([
                 label, str(bits), str(t), str(n), str(k),
-                f"{res['tpospq']:.2f}", f"{res['tneqpq']:.2f}",
+                f"{res['tpospq']:.2f}", f"{res.get('tneqpq', math.nan):.2f}",
                 f"{res['tcons'] / 1e3:.2f}",
                 f"{res['totalbytes'] * 8 / (n * k):.3f}",
-                f"{res['fpr']:.3g}",
+                f"{res.get('fpr', math.nan):.3g}",
             ]))
 
 
@@ -1648,22 +1672,31 @@ def cmd_multi_bench(args):
                 burr_slots(METHODS[method_name], n, args.burr_eps)
 
     if not args.dry_run:
-        if any(METHODS[m]["tool"] == "sux" for m in methods):
+        if any(METHODS[m]["tool"] in ("sux", "phastr") for m in methods):
             ensure_multi_built()
         if any(METHODS[m]["tool"] == "burr" for m in methods):
             ensure_burr_parbench_built(args.burr_dir, bits_list)
+
+    # Functions are bits-agnostic: they run once, with bits 0
+    func_done = set()
 
     for t, bits, (n, k) in itertools.product(threads_list, bits_list,
                                              configs):
         for method_name in methods:
             cfg = METHODS[method_name]
+            bits_m = bits
+            if multi_func(cfg) is not None:
+                if (method_name, t, n) in func_done:
+                    continue
+                func_done.add((method_name, t, n))
+                bits_m = 0
             path = multi_result_path(args.results_dir, method_name, cfg,
-                                     n, bits, k, t, q, b, args)
+                                     n, bits_m, k, t, q, b, args)
             if not args.force and path.exists() and \
                     multi_ok(parse_multi(path.read_text()), cfg, n, k):
                 continue
-            cmd = multi_cmd(cfg, n, bits, k, q, t, b, args)
-            print(f"  multi-bench {method_name} n={n} k={k} bits={bits}"
+            cmd = multi_cmd(cfg, n, bits_m, k, q, t, b, args)
+            print(f"  multi-bench {method_name} n={n} k={k} bits={bits_m}"
                   f" threads={t}", flush=True)
             r = run_cmd(cmd, dry_run=args.dry_run)
             if args.dry_run:
@@ -1951,11 +1984,8 @@ def _figure_series(fig_cfg, bits, args):
         tool_for_parse = _parse_tool(cfg["tool"])
         label = fig_cfg.get("labels", {}).get(method_name, cfg["label"])
         widths = list(enumerate(series_bits)) if series_bits else [(None, bits)]
-        columns = fig_cfg.get("method_columns", {}).get(method_name) or \
-            fig_cfg.get("columns") or \
-            [(fig_cfg["column"], "", cfg.get("linestyle", "-"))]
-        for (pos, b), (col, suffix, linestyle) in itertools.product(widths,
-                                                                    columns):
+        for (pos, b), (col, suffix, linestyle) in itertools.product(
+                widths, _figure_columns(fig_cfg, method_name, cfg)):
             points = []
             for log2_n in range(MIN_LOG2, effective_max_log2(args, cfg, b) + 1):
                 n = 1 << log2_n
@@ -1978,16 +2008,27 @@ def _figure_series(fig_cfg, bits, args):
         if not rdir.exists():
             continue
         tool_for_parse = _parse_tool(cfg["tool"])
-        col = fig_cfg["column"]
-        points = []
-        for log2_n in range(MIN_LOG2, effective_max_log2(args, cfg, bits) + 1):
-            n = 1 << log2_n
-            val = _figure_value(rdir, n, bits, col, tool_for_parse)
-            if val is not None:
-                points.append((n, val))
-        if points:
-            result.append((method_name, None, vec_label, "--", points))
+        for col, suffix, _ in _figure_columns(fig_cfg, method_name, cfg):
+            points = []
+            for log2_n in range(MIN_LOG2,
+                                effective_max_log2(args, cfg, bits) + 1):
+                n = 1 << log2_n
+                val = _figure_value(rdir, n, bits, col, tool_for_parse)
+                if val is not None:
+                    points.append((n, val))
+            if points:
+                result.append((method_name, None, vec_label + suffix, "--",
+                               points))
     return result
+
+
+def _figure_columns(fig_cfg, method_name, cfg):
+    """The (column, label suffix, line style) triples of a method in a figure
+    preset: those of "method_columns" for the method, else those of
+    "columns", else a single triple for "column"."""
+    return fig_cfg.get("method_columns", {}).get(method_name) or \
+        fig_cfg.get("columns") or \
+        [(fig_cfg["column"], "", cfg.get("linestyle", "-"))]
 
 
 def _figure_ymax(figure_name, bits_list, args):
@@ -2805,9 +2846,9 @@ def make_parser():
                                     "--threads are ignored: runs are never "
                                     "pinned, and thread counts are set by "
                                     "--build-threads and --query-threads.")
-    mb.add_argument("--method", default="FuseAug3Shards,BuRR",
+    mb.add_argument("--method", default="FuseAug3Shards,BuRR,VFunc,PHastR",
                     help="Method name(s), comma-separated, or 'all' "
-                         "(default: FuseAug3Shards,BuRR)")
+                         "(default: FuseAug3Shards,BuRR,VFunc,PHastR)")
     mb.add_argument("--bits", default="all",
                     help="Bit widths: 'all' (default), 'even', 'odd', or "
                          "comma-separated ints")

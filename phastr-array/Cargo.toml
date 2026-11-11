@@ -14,6 +14,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 dsi-progress-logger = "0.8.7"
 mem_dbg = "0.4.1"
+rand = "0.10.1"
 rayon = "1"
 value-traits = "0.3.0"
 

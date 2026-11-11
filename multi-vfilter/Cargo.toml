@@ -13,6 +13,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 dsi-progress-logger = "0.8.10"
 mem_dbg = "0.4.1"
+rayon = "1"
 
 [profile.bench]
 inherits = "release"

@@ -579,6 +579,8 @@ FIGURES = {
         # VFilter costs the same on keys and non-keys, so it gets a single
         # line of non-keys, as in the other query figures
         "method_columns": {"FuseAug3Shards": [("multi_neg", "", "-")]},
+        # Drawn again, dashed, from the results of --vec-results-dir
+        "vec_methods": {"FuseAug3Shards": "VFilter-vec"},
         "ylabel": "ns/key",
         # Room for the legend above the flat BuRR-pos lines
         "ymax_factor": 1.5,
@@ -657,6 +659,16 @@ FIGURES = {
         # VFunc drawn again, dashed, from the results of --vec-results-dir
         "vec_methods": {"VFunc": "VFunc(Fuse+Aug)-vec"},
         "column": "query_min",
+        "ylabel": "ns/key",
+    },
+    # BuRR-style parallel queries (multi-bench) of the static functions:
+    # 2^33 / n functions of n keys, queried at random by all threads
+    "phast-multiquery": {
+        "title": "PHastR vs VFunc Parallel Queries",
+        "style_group": "phast",
+        "methods": ["PHastR", "VFunc"],
+        "vec_methods": {"VFunc": "VFunc(Fuse+Aug)-vec"},
+        "column": "multi_pos",
         "ylabel": "ns/key",
     },
     # --- Monotone MMPHF comparison (integer keys) ---

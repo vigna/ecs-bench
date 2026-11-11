@@ -15,16 +15,26 @@
 //! from the one used for the key: otherwise, the filter would be a function
 //! of the key, and only `n` distinct pairs would be queried.
 //!
+//! With `--func`, the benchmark uses static functions instead of filters:
+//! [`VFunc`], or a [`PHastR`] with an array of values (PHastR + array).
+//! Each function maps key *i* to *i* using ⌈lg *n*⌉ bits per value, as in
+//! the single-structure benchmarks, so a positive query checks that the
+//! value is the key. There are no negative queries.
+//!
 //! The last line of the output is a `RESULT type=agg` line using the same
 //! keys as the corresponding line of `parbench.cpp` (`tcons` in
 //! milliseconds, `tpospq` and `tneqpq` in nanoseconds per query).
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+use rayon::prelude::*;
 use dsi_progress_logger::no_logging;
 use mem_dbg::{MemSize, SizeFlags};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use sux::bits::AtomicBitFieldVec;
+use sux::func::{PHastR, PHastRBuilder, VFunc};
+use sux::traits::AtomicBitFieldSlice;
 use std::time::Instant;
 use sux::bits::BitFieldVec;
 use sux::cli::ShardEdgeType;
@@ -64,6 +74,18 @@ struct Args {
     /// The sharding overhead (default: that of VBuilder).​
     #[arg(long)]
     eps: Option<f64>,
+    /// Use static functions instead of filters (--bits and --shard-edge are
+    /// ignored; VFunc uses FuseAug3Shards).​
+    #[arg(long, value_enum)]
+    func: Option<FuncType>,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug)]
+enum FuncType {
+    /// VFunc.
+    Vfunc,
+    /// PHastR + array of values.
+    Phastr,
 }
 
 fn splitmix64(state: &mut u64) -> u64 {
@@ -80,6 +102,7 @@ fn fast_range(r: u64, n: usize) -> usize {
 
 fn bench<F: Send + Sync + MemSize>(
     args: &Args,
+    negative: bool,
     build: impl Fn(u64, usize) -> Result<F> + Sync,
     contains: impl Fn(&F, usize) -> bool + Send + Sync + Copy,
 ) -> Result<()> {
@@ -134,6 +157,9 @@ fn bench<F: Send + Sync + MemSize>(
     let mut per_query = [0.0; 2];
     let mut fps = 0;
     for positive in [true, false] {
+        if !positive && !negative {
+            break;
+        }
         let query_ns = AtomicU64::new(0);
         let found = AtomicUsize::new(0);
         let wall = Instant::now();
@@ -188,15 +214,25 @@ fn bench<F: Send + Sync + MemSize>(
             found as f64 * 100.0 / total
         );
     }
-    println!(
-        "RESULT type=agg n={n} k={k} bits={} tcons={} totalbytes={bytes} tpospq={} tneqpq={} fps={fps} fpr={} threads={t} build_threads={}",
-        args.bits,
-        cons_ns / 1e6,
-        per_query[0],
-        per_query[1],
-        fps as f64 / (q * t) as f64,
-        args.b,
-    );
+    if negative {
+        println!(
+            "RESULT type=agg n={n} k={k} bits={} tcons={} totalbytes={bytes} tpospq={} tneqpq={} fps={fps} fpr={} threads={t} build_threads={}",
+            args.bits,
+            cons_ns / 1e6,
+            per_query[0],
+            per_query[1],
+            fps as f64 / (q * t) as f64,
+            args.b,
+        );
+    } else {
+        println!(
+            "RESULT type=agg n={n} k={k} bits={} tcons={} totalbytes={bytes} tpospq={} threads={t} build_threads={}",
+            args.bits,
+            cons_ns / 1e6,
+            per_query[0],
+            args.b,
+        );
+    }
     Ok(())
 }
 
@@ -206,6 +242,7 @@ macro_rules! run_boxed {
         let args = &$args;
         bench(
             args,
+            true,
             |seed, threads| {
                 <VFilter<usize, Box<[$w]>, $s, $e>>::try_new_with_builder(
                     FromCloneableIntoIterator::from(0..args.n),
@@ -225,6 +262,7 @@ macro_rules! run_bit_field_vec {
         let args = &$args;
         bench(
             args,
+            true,
             |seed, threads| {
                 <VFilter<usize, BitFieldVec<Box<[$w]>>, $s, $e>>::try_new_with_builder(
                     FromCloneableIntoIterator::from(0..args.n),
@@ -236,6 +274,80 @@ macro_rules! run_bit_field_vec {
             |filter: &VFilter<usize, BitFieldVec<Box<[$w]>>, $s, $e>, key| filter.contains(key),
         )
     }};
+}
+
+/// PHastR + array of values.
+struct PHastRArray {
+    func: PHastR<usize>,
+    values: BitFieldVec<Box<[usize]>>,
+}
+
+impl MemSize for PHastRArray {
+    fn mem_size_rec(&self, flags: SizeFlags, refs: &mut mem_dbg::HashMap<usize, usize>) -> usize {
+        self.func.mem_size_rec(flags, refs) + self.values.mem_size_rec(flags, refs)
+    }
+}
+
+/// Runs a closure in a thread pool with the given number of threads, so that
+/// the parallel parts of construction use only the threads of a builder.
+fn in_pool<T: Send>(threads: usize, f: impl FnOnce() -> Result<T> + Send) -> Result<T> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()?
+        .install(f)
+}
+
+fn run_func(args: &Args, func: FuncType) -> Result<()> {
+    let n = args.n;
+    let width = (usize::BITS - (n - 1).max(1).leading_zeros()) as usize;
+    match func {
+        FuncType::Vfunc => bench(
+            args,
+            false,
+            |seed, threads| {
+                in_pool(threads, || {
+                    <VFunc<usize, BitFieldVec<Box<[usize]>>, [u64; 2], FuseAug3Shards>>::try_new_with_builder(
+                        FromCloneableIntoIterator::from(0..n),
+                        FromCloneableIntoIterator::from(0..n),
+                        builder(args, seed, threads),
+                        no_logging![],
+                    )
+                })
+            },
+            |f: &VFunc<usize, BitFieldVec<Box<[usize]>>, [u64; 2], FuseAug3Shards>, key| {
+                f.get(key) == key
+            },
+        ),
+        FuncType::Phastr => bench(
+            args,
+            false,
+            |seed, threads| {
+                in_pool(threads, || {
+                    let func = <PHastR<usize>>::try_new_with_builder(
+                        FromCloneableIntoIterator::from(0..n),
+                        PHastRBuilder::default().seed(seed),
+                        no_logging![],
+                    )?;
+                    // Unaligned reads need a padding word; the array is filled
+                    // through an atomic view, as distinct values may share a
+                    // word
+                    let mut values = BitFieldVec::<Box<[usize]>>::new_padded(width, n);
+                    {
+                        let atomic: AtomicBitFieldVec<&mut [AtomicUsize]> =
+                            BitFieldVec::<&mut [usize]>::from(&mut values).try_into()?;
+                        (0..n).into_par_iter().for_each(|i| {
+                            atomic.set_atomic(func.get(i), i, Ordering::Relaxed);
+                        });
+                    }
+                    Ok(PHastRArray { func, values })
+                })
+            },
+            |f: &PHastRArray, key| {
+                // SAFETY: the output of the PHastR is smaller than n
+                unsafe { f.values.get_unaligned_unchecked(f.func.get(key)) == key }
+            },
+        ),
+    }
 }
 
 fn builder<D, S, E: Default>(args: &Args, seed: u64, threads: usize) -> VBuilder<D, S, E> {
@@ -263,6 +375,9 @@ macro_rules! dispatch_edge {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Some(func) = args.func {
+        return run_func(&args, func);
+    }
     match args.bits {
         8 => dispatch_edge!(args, run_boxed, u8),
         16 => dispatch_edge!(args, run_boxed, u16),
