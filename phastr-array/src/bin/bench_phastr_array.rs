@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use clap::Parser;
-use dsi_progress_logger::no_logging;
+use dsi_progress_logger::no_logs;
 use mem_dbg::{MemSize, SizeFlags};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -51,7 +51,7 @@ fn main() -> Result<()> {
         <PHastR<u64>>::try_new_with_builder(
             FromCloneableIntoIterator::new(0..n),
             PHastRBuilder::default().offline(args.offline),
-            no_logging![],
+            no_logs![],
         )
     })?;
 

@@ -28,7 +28,7 @@
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
-use dsi_progress_logger::no_logging;
+use dsi_progress_logger::no_logs;
 use mem_dbg::{MemSize, SizeFlags};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -247,7 +247,7 @@ macro_rules! run_boxed {
                 <VFilter<usize, Box<[$w]>, $s, $e>>::try_new_with_builder(
                     FromCloneableIntoIterator::from(0..args.n),
                     builder(args, seed, threads),
-                    no_logging![],
+                    no_logs![],
                 )
             },
             |filter: &VFilter<usize, Box<[$w]>, $s, $e>, key| filter.contains(key),
@@ -268,7 +268,7 @@ macro_rules! run_bit_field_vec {
                     FromCloneableIntoIterator::from(0..args.n),
                     args.bits,
                     builder(args, seed, threads),
-                    no_logging![],
+                    no_logs![],
                 )
             },
             |filter: &VFilter<usize, BitFieldVec<Box<[$w]>>, $s, $e>, key| filter.contains(key),
@@ -310,7 +310,7 @@ fn run_func(args: &Args, func: FuncType) -> Result<()> {
                         FromCloneableIntoIterator::from(0..n),
                         FromCloneableIntoIterator::from(0..n),
                         builder(args, seed, threads),
-                        no_logging![],
+                        no_logs![],
                     )
                 })
             },
@@ -326,7 +326,7 @@ fn run_func(args: &Args, func: FuncType) -> Result<()> {
                     let func = <PHastR<usize>>::try_new_with_builder(
                         FromCloneableIntoIterator::from(0..n),
                         PHastRBuilder::default().seed(seed),
-                        no_logging![],
+                        no_logs![],
                     )?;
                     // Unaligned reads need a padding word; the array is filled
                     // through an atomic view, as distinct values may share a
