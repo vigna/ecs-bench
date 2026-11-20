@@ -16,10 +16,19 @@
 //! of the key, and only `n` distinct pairs would be queried.
 //!
 //! With `--func`, the benchmark uses static functions instead of filters:
-//! [`VFunc`], or a [`PHastR`] with an array of values (PHastR + array).
-//! Each function maps key *i* to *i* using ⌈lg *n*⌉ bits per value, as in
-//! the single-structure benchmarks, so a positive query checks that the
-//! value is the key. There are no negative queries.
+//! [`VFunc`], or a [`PHunc`] (a [`PHastR`] with an array of values). Each
+//! function maps key *i* to *i* using ⌈lg *n*⌉ bits per value, as in the
+//! single-structure benchmarks, so a positive query checks that the value is
+//! the key. There are no negative queries.
+//!
+//! With `--func phunc-bits`, each [`PHunc`] maps key *i* to a hash of *i*
+//! of `--bits` bits, and it is queried as a filter: a query checks that the
+//! value is the hash of the key, so there are also negative queries, whose
+//! false positives have the same rate as those of a filter with the same
+//! number of bits.
+//!
+//! All [`PHunc`]s are built from the same vectors of keys and values, which
+//! takes less memory than reading keys and values from lenders.
 //!
 //! The last line of the output is a `RESULT type=agg` line using the same
 //! keys as the corresponding line of `parbench.cpp` (`tcons` in
@@ -27,14 +36,12 @@
 
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use rayon::prelude::*;
 use dsi_progress_logger::no_logs;
 use mem_dbg::{MemSize, SizeFlags};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use sux::bits::AtomicBitFieldVec;
-use sux::func::{PHastR, PHastRBuilder, VFunc};
-use sux::traits::AtomicBitFieldSlice;
+use sux::func::{PHastR, PHastRBuilder, PHunc, VFunc};
+use sux::traits::{TryIntoUnaligned, Unaligned};
 use std::time::Instant;
 use sux::bits::BitFieldVec;
 use sux::cli::ShardEdgeType;
@@ -74,8 +81,8 @@ struct Args {
     /// The sharding overhead (default: that of VBuilder).​
     #[arg(long)]
     eps: Option<f64>,
-    /// Use static functions instead of filters (--bits and --shard-edge are
-    /// ignored; VFunc uses FuseAug3Shards).​
+    /// Use static functions instead of filters (--shard-edge is ignored, and
+    /// so is --bits, except with phunc-bits; VFunc uses FuseAug3Shards).​
     #[arg(long, value_enum)]
     func: Option<FuncType>,
 }
@@ -84,13 +91,25 @@ struct Args {
 enum FuncType {
     /// VFunc.
     Vfunc,
-    /// PHastR + array of values.
-    Phastr,
+    /// PHunc (a PHastR with an array of values) mapping each key to itself.
+    Phunc,
+    /// PHunc mapping each key to a hash of --bits bits, queried as a filter.
+    PhuncBits,
 }
 
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9e3779b97f4a7c15);
     let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    z ^ (z >> 31)
+}
+
+/// Returns the hash that the functions of `--func phunc-bits` associate
+/// with a key (a SplitMix64 step).
+#[inline(always)]
+fn hash(key: usize) -> u64 {
+    let mut z = (key as u64).wrapping_add(0x9e3779b97f4a7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
     z ^ (z >> 31)
@@ -276,16 +295,33 @@ macro_rules! run_bit_field_vec {
     }};
 }
 
-/// PHastR + array of values.
-struct PHastRArray {
-    func: PHastR<usize>,
-    values: BitFieldVec<Box<[usize]>>,
-}
+/// A PHunc with values in a bit-field vector, read unaligned.
+type BitFunc = Unaligned<PHunc<PHastR<usize>, BitFieldVec<Box<[usize]>>>>;
 
-impl MemSize for PHastRArray {
-    fn mem_size_rec(&self, flags: SizeFlags, refs: &mut mem_dbg::HashMap<usize, usize>) -> usize {
-        self.func.mem_size_rec(flags, refs) + self.values.mem_size_rec(flags, refs)
-    }
+// Runs the benchmark on PHuncs mapping each key to a hash of the size of W
+// (8, 16, or 32 bits), stored in a boxed slice, and queried as filters
+macro_rules! run_phunc_boxed {
+    ($args: expr, $w: ty) => {{
+        let args = &$args;
+        let keys: Vec<usize> = (0..args.n).collect();
+        let values: Vec<$w> = keys.iter().map(|&key| hash(key) as $w).collect();
+        bench(
+            args,
+            true,
+            |seed, threads| {
+                in_pool(threads, || {
+                    Ok(<PHunc<PHastR<usize>, Box<[$w]>>>::try_par_new_with_builder(
+                        &keys,
+                        &values,
+                        PHastRBuilder::default().seed(seed),
+                        no_logs![],
+                    )?
+                    .try_into_unaligned()?)
+                })
+            },
+            |f: &Unaligned<PHunc<PHastR<usize>, Box<[$w]>>>, key| f.get(key) == hash(key) as $w,
+        )
+    }};
 }
 
 /// Runs a closure in a thread pool with the given number of threads, so that
@@ -299,7 +335,6 @@ fn in_pool<T: Send>(threads: usize, f: impl FnOnce() -> Result<T> + Send) -> Res
 
 fn run_func(args: &Args, func: FuncType) -> Result<()> {
     let n = args.n;
-    let width = (usize::BITS - (n - 1).max(1).leading_zeros()) as usize;
     match func {
         FuncType::Vfunc => bench(
             args,
@@ -318,35 +353,58 @@ fn run_func(args: &Args, func: FuncType) -> Result<()> {
                 f.get(key) == key
             },
         ),
-        FuncType::Phastr => bench(
-            args,
-            false,
-            |seed, threads| {
-                in_pool(threads, || {
-                    let func = <PHastR<usize>>::try_new_with_builder(
-                        FromCloneableIntoIterator::from(0..n),
-                        PHastRBuilder::default().seed(seed),
-                        no_logs![],
-                    )?;
-                    // Unaligned reads need a padding word; the array is filled
-                    // through an atomic view, as distinct values may share a
-                    // word
-                    let mut values = BitFieldVec::<Box<[usize]>>::new_padded(width, n);
-                    {
-                        let atomic: AtomicBitFieldVec<&mut [AtomicUsize]> =
-                            BitFieldVec::<&mut [usize]>::from(&mut values).try_into()?;
-                        (0..n).into_par_iter().for_each(|i| {
-                            atomic.set_atomic(func.get(i), i, Ordering::Relaxed);
-                        });
-                    }
-                    Ok(PHastRArray { func, values })
-                })
-            },
-            |f: &PHastRArray, key| {
-                // SAFETY: the output of the PHastR is smaller than n
-                unsafe { f.values.get_unaligned_unchecked(f.func.get(key)) == key }
-            },
-        ),
+        FuncType::Phunc => {
+            // The values are the keys
+            let keys: Vec<usize> = (0..n).collect();
+            bench(
+                args,
+                false,
+                |seed, threads| {
+                    in_pool(threads, || {
+                        Ok(
+                            <PHunc<PHastR<usize>, BitFieldVec<Box<[usize]>>>>::try_par_new_with_builder(
+                                &keys,
+                                &keys,
+                                PHastRBuilder::default().seed(seed),
+                                no_logs![],
+                            )?
+                            .try_into_unaligned()?,
+                        )
+                    })
+                },
+                |f: &BitFunc, key| f.get(key) == key,
+            )
+        }
+        FuncType::PhuncBits => match args.bits {
+            8 => run_phunc_boxed!(*args, u8),
+            16 => run_phunc_boxed!(*args, u16),
+            32 => run_phunc_boxed!(*args, u32),
+            bits @ 1..=63 => {
+                let mask = (1_usize << bits) - 1;
+                let keys: Vec<usize> = (0..n).collect();
+                let values: Vec<usize> =
+                    keys.iter().map(|&key| hash(key) as usize & mask).collect();
+                bench(
+                    args,
+                    true,
+                    |seed, threads| {
+                        in_pool(threads, || {
+                            Ok(
+                                <PHunc<PHastR<usize>, BitFieldVec<Box<[usize]>>>>::try_par_new_with_builder(
+                                    &keys,
+                                    &values,
+                                    PHastRBuilder::default().seed(seed),
+                                    no_logs![],
+                                )?
+                                .try_into_unaligned()?,
+                            )
+                        })
+                    },
+                    |f: &BitFunc, key| f.get(key) == hash(key) as usize & mask,
+                )
+            }
+            bits => anyhow::bail!("unsupported number of bits {bits} (use 1 to 63)"),
+        },
     }
 }
 

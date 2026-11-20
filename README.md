@@ -356,6 +356,14 @@ and missing augmented peeling would make its build time differ from `VFilter`'s
 for reasons that have nothing to do with sharding. GOV3 reports no construction
 time either, because Java builds it.
 
+`PHuncBits` is `PHunc` with a pseudorandom value of the given number of bits
+for each key, in place of the index of the key: it appears as PHunc in the
+filter figures and in the filter table, with `PHuncBits-seq` for its
+single-threaded construction. In `multi-bench` it is queried as a filter
+(the value of a key is a hash of the key, and a query checks it), so it has
+negative queries, too. `bench/phunc-campaign.sh` runs all the experiments on
+`PHunc` and `PHuncBits` on the machine of the paper, with both builds.
+
 ### CPU pinning
 
 For more stable measurements, pin single-threaded phases to an isolated core:
@@ -367,11 +375,11 @@ python3 bench/run.py bench --pin "taskset -c 2"
 The `--pin` prefix is applied to:
 
 - the query commands of all methods, except `VFunc`, `VFuncFullSigs`, and
-  `PHastR` (a PHastR minimal perfect hash function with an array of values,
-  that is, a `PHunc` of sux-rs, built with `phunc` and queried with
-  `bench_phunc`), which are queried unpinned: `PHastR` used to build and
-  query in a single multi-threaded process, and the functions it is compared
-  with were queried unpinned too;
+  `PHunc` (the `PHunc` of sux-rs, a PHastR minimal perfect hash function with
+  an array of values, mapping each key to its index, built with `phunc` and
+  queried with `bench_phunc`), which are queried unpinned: the predecessor
+  of `PHunc` built and queried in a single multi-threaded process, and the
+  functions it was compared with were queried unpinned too;
 - the builds of the LCP-based monotone minimal perfect hash functions
   (`lcp_mmphf`, which runs single-threaded);
 - the whole runs of `LeMonHashInt` and `LeMonHashStr`, which build and query
@@ -401,7 +409,7 @@ results/
 ```
 
 `<bits>` is 0 for bits-agnostic methods (compressed functions, `VFunc`,
-`VFuncFullSigs`, `PHastR`, and monotone minimal perfect hash functions), for
+`VFuncFullSigs`, `PHunc`, and monotone minimal perfect hash functions), for
 which bits/key is a result rather than a parameter.
 
 When building and querying are separate steps, a `.err` file contains the

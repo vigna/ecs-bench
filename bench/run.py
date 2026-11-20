@@ -64,6 +64,7 @@ from configs import (  # noqa: E402
     MIN_LOG2,
     ODD_BITS,
     PARALLEL,
+    STYLE_ORDER,
     QUERY_KEYS,
     SUX_FEATURES,
     SUX_PROFILE,
@@ -509,8 +510,8 @@ def sux_build_cmd(cfg, n, bits, outfile, args):
         cmd += ["--bits", str(bits)]
         if args.unaligned and bits not in EVEN_BITS:
             cmd += ["--unaligned"]
-    # Methods that always use unaligned reads (PHastR + array)
-    if cfg.get("unaligned", False):
+    # Methods that always use unaligned reads (PHunc)
+    if cfg.get("unaligned", False) and "--unaligned" not in cmd:
         cmd += ["--unaligned"]
 
     # Per-method extras: --eps, --seed, etc.
@@ -549,7 +550,7 @@ def sux_query_cmd(cfg, n, bits, infile, args):
         cmd += ["--bits", str(bits)]
     if bits > 0 and args.unaligned and bits not in EVEN_BITS:
         cmd += ["--unaligned"]
-    if cfg.get("unaligned", False):
+    if cfg.get("unaligned", False) and "--unaligned" not in cmd:
         cmd += ["--unaligned"]
     return cmd
 
@@ -1419,13 +1420,20 @@ def ensure_burr_parbench_built(burr_dir, bits_values):
 
 def multi_func(cfg):
     """The --func argument of multi_vfilter for the static functions that
-    multi-bench can run (VFunc and PHastR + array), or None."""
+    multi-bench can run (VFunc and PHunc), or None. PHunc with a given
+    number of bits (phunc-bits) is queried as a filter."""
     if cfg["tool"] == "sux" and cfg.get("build_bin") == "phunc":
-        return "phastr"
+        return "phunc" if cfg.get("bits_agnostic", False) else "phunc-bits"
     if cfg["tool"] == "sux" and cfg.get("build_bin") == "vfunc" and \
             cfg.get("shard_edge") == "fuse-aug3-shards":
         return "vfunc"
     return None
+
+
+def multi_bits_agnostic(cfg):
+    """Whether a method of multi-bench runs once, with bits 0, whatever the
+    bit widths requested (the functions mapping each key to its index)."""
+    return multi_func(cfg) is not None and cfg.get("bits_agnostic", False)
 
 
 def multi_methods(arg):
@@ -1484,10 +1492,11 @@ def multi_cmd(cfg, n, bits, k, q, t, b, args):
     """Assemble the command line of one multi-bench run."""
     func = multi_func(cfg)
     if func is not None:
-        # Functions have only positive queries and are bits-agnostic
+        # Bits-agnostic functions (bits is zero) have only positive queries
         cmd = [str(multi_target_dir() / "release" / "multi-vfilter")]
         cmd += ["-n", str(n), "-k", str(k), "-q", str(q),
-                "-t", str(t), "-b", str(b), "--bits", "0", "--func", func]
+                "-t", str(t), "-b", str(b), "--bits", str(bits),
+                "--func", func]
     elif cfg["tool"] == "sux":
         cmd = [str(multi_target_dir() / "release" / "multi-vfilter")]
         cmd += ["-n", str(n), "-k", str(k), "-q", str(q),
@@ -1565,8 +1574,8 @@ def multi_report(methods, bits_list, threads_list, configs, q, b, args):
             # The bits of this method: bits itself must not change, as it
             # is used by the methods that follow
             bits_m = bits
-            if multi_func(cfg) is not None:
-                # Functions are bits-agnostic: reported once, as bits 0
+            if multi_bits_agnostic(cfg):
+                # Bits-agnostic functions are reported once, as bits 0
                 if bits != bits_list[0]:
                     continue
                 bits_m = 0
@@ -1637,7 +1646,7 @@ def cmd_multi_bench(args):
         for method_name in methods:
             cfg = METHODS[method_name]
             bits_m = bits
-            if multi_func(cfg) is not None:
+            if multi_bits_agnostic(cfg):
                 if (method_name, t, n) in func_done:
                     continue
                 func_done.add((method_name, t, n))
@@ -2005,7 +2014,7 @@ def _figure_styles(figure_name):
     color and marker in all plots of the group, whatever the other methods
     of each plot, and whether or not they have points."""
     group = FIGURES[figure_name].get("style_group", figure_name)
-    methods = []
+    methods = list(STYLE_ORDER.get(group, []))
     for name, fig_cfg in FIGURES.items():
         if fig_cfg.get("style_group", name) != group:
             continue
@@ -2029,6 +2038,8 @@ def _plot_one(figure_name, args, plt):
     """Generate PDFs for a single figure preset."""
     fig_cfg = FIGURES[figure_name]
     markers = ["o", "s", "^", "v", "p", "*", "h", "D"]
+    # Styles after the ten colors of the default cycle
+    extra_styles = [("black", "X"), ("gray", "P")]
     bits_list = resolve_bits(args.bits)
     global_ymax = _figure_ymax(figure_name, bits_list, args)
     styles = _figure_styles(figure_name)
@@ -2040,10 +2051,14 @@ def _plot_one(figure_name, args, plt):
         series = _figure_series(fig_cfg, bits, args)
         for method_name, pos, label, linestyle, points in series:
             si = styles[method_name] * widths + (pos or 0)
-            # "Cn" is the n-th color of the color cycle (modulo its length)
+            # "Cn" is the n-th color of the color cycle, which has ten colors
+            if si < 10:
+                color, marker = f"C{si}", markers[si % len(markers)]
+            else:
+                color, marker = extra_styles[(si - 10) % len(extra_styles)]
             plt.plot([n for n, _ in points], [v for _, v in points],
-                     color=f"C{si}",
-                     marker=markers[si % len(markers)],
+                     color=color,
+                     marker=marker,
                      linestyle=linestyle,
                      label=label)
 
@@ -2178,6 +2193,9 @@ TABLES = {
                           "query_par_col": "multi_pos"}),
             ("VFilter", {"constr_seq": "FuseAug3Shards-seq", "constr_par": "FuseAug3Shards",
                        "query_seq": "FuseAug3Shards", "query_par": "FuseAug3Shards"}),
+            # PHunc mapping each key to a value of the given number of bits
+            ("PHunc", {"constr_seq": "PHuncBits-seq", "constr_par": "PHuncBits",
+                       "query_seq": "PHuncBits", "query_par": "PHuncBits"}),
             # The parallel queries are BuRR-style (multi-bench), which pits
             # VFilter against BuRR only
             ("MWHC", {"constr_seq": None, "constr_par": "Mwhc3",
@@ -2798,9 +2816,10 @@ def make_parser():
                                     "--threads are ignored: runs are never "
                                     "pinned, and thread counts are set by "
                                     "--build-threads and --query-threads.")
-    mb.add_argument("--method", default="FuseAug3Shards,BuRR,VFunc,PHastR",
+    mb.add_argument("--method",
+                    default="FuseAug3Shards,BuRR,VFunc,PHunc,PHuncBits",
                     help="Method name(s), comma-separated, or 'all' "
-                         "(default: FuseAug3Shards,BuRR,VFunc,PHastR)")
+                         "(default: FuseAug3Shards,BuRR,VFunc,PHunc,PHuncBits)")
     mb.add_argument("--bits", default="all",
                     help="Bit widths: 'all' (default), 'even', 'odd', or "
                          "comma-separated ints")

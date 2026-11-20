@@ -341,10 +341,10 @@ METHODS = {
         "bits_agnostic": True,
         "build_threads": PARALLEL,
         "max_log2": 33,
-        # Compared against PHastR + array, whose build+query used to run in
-        # one process, which could not be pinned.  VFunc queries were run
-        # unpinned too so the comparison was apples-to-apples; we keep both
-        # unpinned, for consistency with the existing results.
+        # Compared against PHunc. Its predecessor (PHastR + array) built and
+        # queried in one process, which could not be pinned, so VFunc queries
+        # were run unpinned too; we keep both unpinned, for consistency with
+        # the existing results.
         "pin_query": False,
     },
     "VFuncFullSigs": {
@@ -366,26 +366,56 @@ METHODS = {
         "pin_query": False,
     },
     # -----------------------------------------------------------------
-    # PHastR (minimal perfect hash + array)
+    # PHunc (minimal perfect hash function + array of values)
     # -----------------------------------------------------------------
     #
-    # The structure is PHunc, from sux-rs: it is built with phunc and
-    # queried with bench_phunc, as VFunc is with vfunc and bench_vfunc.
-    # Bits-agnostic (bits/key is a result metric).
+    # PHunc, from sux-rs, is a PHastR minimal perfect hash function with an
+    # array of values. It is built with phunc and queried with bench_phunc,
+    # as VFunc is with vfunc and bench_vfunc; values are always read
+    # unaligned (which matters for bit-field vectors and for the PHastR).
+    #
+    # PHunc maps each key to its index, as VFunc does, and it is
+    # bits-agnostic (bits/key is a result metric):
     #   Build:  phunc -n <n> --unaligned --threads <t> <outfile>
     #   Query:  bench_phunc <query_keys> <outfile> --unaligned
-    "PHastR": {
+    #
+    # PHuncBits maps each key to a pseudorandom value of the given number of
+    # bits, as the filters do (8, 16, and 32 bits use a boxed slice, other
+    # widths a bit-field vector):
+    #   Build:  phunc -n <n> --bits <b> --unaligned --threads <t> <outfile>
+    #   Query:  bench_phunc <query_keys> <outfile> --bits <b> --unaligned
+    "PHunc": {
         "tool": "sux",
-        "label": "PHastR",
+        "label": "PHunc",
         "build_bin": "phunc",
         "bench_bin": "bench_phunc",
         "bits_agnostic": True,
-        # The values are in a padded bit-field vector, read unaligned
         "unaligned": True,
         "build_threads": PARALLEL,
         "max_log2": 33,
         # Unpinned queries, as for VFunc
         "pin_query": False,
+    },
+    "PHuncBits": {
+        "tool": "sux",
+        "label": "PHunc",
+        "build_bin": "phunc",
+        "bench_bin": "bench_phunc",
+        "unaligned": True,
+        "build_threads": PARALLEL,
+        "max_log2": 33,
+    },
+    "PHuncBits-seq": {
+        "tool": "sux",
+        "label": "PHunc(seq)",
+        # Same structure, single-threaded build.
+        # Used only for construction-time comparison (no query benchmark).
+        "build_bin": "phunc",
+        "bench_bin": "bench_phunc",
+        "unaligned": True,
+        "build_threads": 1,
+        "no_queries": True,
+        "max_log2": 33,
     },
     # -----------------------------------------------------------------
     # Monotone MMPHF methods (integer keys)
@@ -527,6 +557,17 @@ METHODS = {
 #   "ymax_factor": ratio between the upper limit of the vertical axis and
 #                  the largest value (by default, 1.15).
 
+# The first methods of a style group, in order: they keep their styles when
+# new methods are added to the presets of the group (the other methods
+# follow, in order of first appearance).
+STYLE_ORDER = {
+    "filter": [
+        "Fuse3NoShards64", "Fuse3NoShards128", "FuseAug3Shards", "Mwhc3",
+        "BuRR", "FuseAug3Shards-seq", "BuRR-seq", "HemVFilter", "BuRR-pos",
+        "BuRR-func",
+    ],
+}
+
 FIGURES = {
     # --- Filters: per bit width ---
     # One PDF per bit width: filter-build-8.pdf, filter-query-32.pdf, etc.
@@ -542,6 +583,8 @@ FIGURES = {
             "BuRR",
             "FuseAug3Shards-seq",
             "BuRR-seq",
+            "PHuncBits",
+            "PHuncBits-seq",
         ],
         "column": "constr_ns",
         "ylabel": "ns/key",
@@ -562,6 +605,7 @@ FIGURES = {
             "BuRR",
             "BuRR-pos",
             "BuRR-func",
+            "PHuncBits",
         ],
         # Methods drawn again, dashed, from the results of --vec-results-dir
         # (a campaign with auto-vectorization enabled)
@@ -580,11 +624,13 @@ FIGURES = {
         "methods": [
             "FuseAug3Shards",
             "BuRR",
+            "PHuncBits",
         ],
         "columns": [("multi_neg", "-neg", "-"), ("multi_pos", "-pos", "--")],
-        # VFilter costs the same on keys and non-keys, so it gets a single
-        # line of non-keys, as in the other query figures
-        "method_columns": {"FuseAug3Shards": [("multi_neg", "", "-")]},
+        # VFilter and PHunc cost the same on keys and non-keys, so they get
+        # a single line of non-keys, as in the other query figures
+        "method_columns": {"FuseAug3Shards": [("multi_neg", "", "-")],
+                           "PHuncBits": [("multi_neg", "", "-")]},
         # Drawn again, dashed, from the results of --vec-results-dir
         "vec_methods": {"FuseAug3Shards": "VFilter-vec"},
         "ylabel": "ns/key",
@@ -649,19 +695,19 @@ FIGURES = {
         "column": "query_min",
         "ylabel": "ns/key",
     },
-    # --- PHastR comparison: no bit width suffix ---
+    # --- PHunc comparison: no bit width suffix ---
     # Bits-agnostic: phast-build.pdf, phast-query.pdf.
     "phast-build": {
-        "title": "PHastR vs VFunc Construction",
+        "title": "PHunc vs VFunc Construction",
         "style_group": "phast",
-        "methods": ["PHastR", "VFunc"],
+        "methods": ["PHunc", "VFunc"],
         "column": "constr_ns",
         "ylabel": "ns/key",
     },
     "phast-query": {
-        "title": "PHastR vs VFunc Queries",
+        "title": "PHunc vs VFunc Queries",
         "style_group": "phast",
-        "methods": ["PHastR", "VFunc"],
+        "methods": ["PHunc", "VFunc"],
         # VFunc drawn again, dashed, from the results of --vec-results-dir
         "vec_methods": {"VFunc": "VFunc(Fuse+Aug)-vec"},
         "column": "query_min",
@@ -670,9 +716,9 @@ FIGURES = {
     # BuRR-style parallel queries (multi-bench) of the static functions:
     # 2^33 / n functions of n keys, queried at random by all threads
     "phast-multiquery": {
-        "title": "PHastR vs VFunc Parallel Queries",
+        "title": "PHunc vs VFunc Parallel Queries",
         "style_group": "phast",
-        "methods": ["PHastR", "VFunc"],
+        "methods": ["PHunc", "VFunc"],
         "vec_methods": {"VFunc": "VFunc(Fuse+Aug)-vec"},
         "column": "multi_pos",
         "ylabel": "ns/key",
