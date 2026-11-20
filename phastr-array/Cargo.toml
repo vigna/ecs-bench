@@ -1,6 +1,5 @@
-# PHastR + array: the static function the paper compares with VFunc.
-# Lives in ecs-bench rather than in sux because it is of no interest outside
-# the paper.
+# PHastR + array: the static function the paper compares with VFunc. The
+# structure is PHunc, from sux; this crate contains just its benchmark.
 [package]
 name = "phastr-array"
 version = "0.1.0"

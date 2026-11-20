@@ -1,22 +1,20 @@
-//! Benchmarks a static function made of a [`PHastR`] minimal perfect hash
-//! function and an array of values on 64-bit integer keys, for comparison
-//! with [`VFunc`](sux::func::VFunc).
+//! Benchmarks a [`PHunc`], a static function made of a [`PHastR`] minimal
+//! perfect hash function and an array of values, on 64-bit integer keys, for
+//! comparison with [`VFunc`](sux::func::VFunc).
 //!
-//! The keys are the integers in [0 . . *n*), and the *i*-th key is mapped to
-//! *i* using ⌈lg *n*⌉ bits per value. The keys are never materialized: they
-//! are streamed to the construction, and then again to fill the array of
-//! values.
+//! The keys are the integers in [0 . . *n*), and the *i*-th key is mapped to
+//! *i* using ⌈lg *n*⌉ bits per value. The keys and the values are never
+//! materialized: they are streamed to the construction, which reads them
+//! just once.
 
 use anyhow::Result;
 use clap::Parser;
 use dsi_progress_logger::no_logs;
 use mem_dbg::{MemSize, SizeFlags};
-use rayon::prelude::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use sux::bits::{AtomicBitFieldVec, BitFieldVec};
+use sux::bits::BitFieldVec;
 use sux::cli::{INCR, bench, init_env_logger};
-use sux::func::{PHastR, PHastRBuilder};
-use sux::traits::AtomicBitFieldSlice;
+use sux::func::{PHastR, PHastRBuilder, PHunc};
+use sux::traits::TryIntoUnaligned;
 use sux::utils::FromCloneableIntoIterator;
 
 #[derive(Parser, Debug)]
@@ -47,28 +45,19 @@ fn main() -> Result<()> {
 
     let start = std::time::Instant::now();
 
-    let func = pool.install(|| {
-        <PHastR<u64>>::try_new_with_builder(
-            FromCloneableIntoIterator::new(0..n),
-            PHastRBuilder::default().offline(args.offline),
-            no_logs![],
-        )
-    })?;
-
-    // Unaligned reads need a padding word at the end of the vector. We fill
-    // it in parallel through an atomic view, as distinct values may share a
-    // word.
-    let mut output =
-        BitFieldVec::<Box<[usize]>>::new_padded((args.n - 1).ilog2() as usize + 1, args.n);
-    {
-        let atomic: AtomicBitFieldVec<&mut [AtomicUsize]> =
-            BitFieldVec::<&mut [usize]>::from(&mut output).try_into()?;
-        pool.install(|| {
-            (0..n).into_par_iter().for_each(|i| {
-                atomic.set_atomic(func.get(i), i as usize, Ordering::Relaxed);
-            })
-        });
-    }
+    // The values are written into a bit-field vector in parallel, once the
+    // minimal perfect hash function has been built; the vector has a
+    // padding word, so we can use unaligned reads.
+    let func = pool
+        .install(|| {
+            <PHunc<PHastR<u64>, BitFieldVec<Box<[usize]>>>>::try_new_with_builder(
+                FromCloneableIntoIterator::new(0..n),
+                FromCloneableIntoIterator::new(0..args.n),
+                PHastRBuilder::default().offline(args.offline),
+                no_logs![],
+            )
+        })?
+        .try_into_unaligned()?;
 
     let elapsed = start.elapsed();
     let secs = elapsed.as_secs_f64();
@@ -78,7 +67,7 @@ fn main() -> Result<()> {
         secs, args.n, ns_per_key
     );
 
-    let bytes = func.mem_size(SizeFlags::default()) + output.mem_size(SizeFlags::default());
+    let bytes = func.mem_size(SizeFlags::default());
     eprintln!("Bits/key: {:.3}", (bytes * 8) as f64 / args.n as f64);
 
     bench(args.samples, args.repeats, || {
@@ -86,7 +75,7 @@ fn main() -> Result<()> {
         let mut acc: usize = 0;
         for _ in 0..args.samples {
             key = key.wrapping_add(INCR as u64);
-            acc ^= unsafe { output.get_unaligned_unchecked(func.get(key)) };
+            acc ^= func.get(key);
         }
         std::hint::black_box(acc);
     });

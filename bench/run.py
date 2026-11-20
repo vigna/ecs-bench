@@ -1613,13 +1613,16 @@ def multi_report(methods, bits_list, threads_list, configs, q, b, args):
                                              configs):
         for method_name in methods:
             cfg = METHODS[method_name]
+            # The bits of this method: bits itself must not change, as it
+            # is used by the methods that follow
+            bits_m = bits
             if multi_func(cfg) is not None:
                 # Functions are bits-agnostic: reported once, as bits 0
                 if bits != bits_list[0]:
                     continue
-                bits = 0
+                bits_m = 0
             path = multi_result_path(args.results_dir, method_name, cfg,
-                                     n, bits, k, t, q, b, args)
+                                     n, bits_m, k, t, q, b, args)
             if not path.exists():
                 continue
             res = parse_multi(path.read_text())
@@ -1630,7 +1633,7 @@ def multi_report(methods, bits_list, threads_list, configs, q, b, args):
                 f, width = burr_eps_numerator(cfg, args.burr_eps)
                 label += f"(eps=-{f}/{width})"
             print("\t".join([
-                label, str(bits), str(t), str(n), str(k),
+                label, str(bits_m), str(t), str(n), str(k),
                 f"{res['tpospq']:.2f}", f"{res.get('tneqpq', math.nan):.2f}",
                 f"{res['tcons'] / 1e3:.2f}",
                 f"{res['totalbytes'] * 8 / (n * k):.3f}",
