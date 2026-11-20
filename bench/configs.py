@@ -7,7 +7,7 @@ parameters, and how they map to paper figures.
 Each entry in METHODS specifies:
   - tool: "sux" (VFilter/VFunc), "burr" (BuRR ribbon), "csf"
     (BuRR-VL compressed static functions), "comp-vfunc" (sux-rs
-    CompVFunc), "phastr" (PHastR + array), "mmphf" (monotone MMPHF, integer
+    CompVFunc), "mmphf" (monotone MMPHF, integer
     keys), "mmphf-str" (monotone MMPHF, string keys), "lemonhash"
     (LeMonHash, integer keys), "lemonhash-str" (LeMonHash, string
     keys), "java" (Sux4J GOV3), "hem" (HEM-sharded VFilter, hem-vfilter/)
@@ -58,7 +58,7 @@ SUX_PROFILE = "bench"
 # metric, not a build parameter).  Used as the default when a method
 # does not set "bits_agnostic" explicitly.
 BITS_AGNOSTIC_TOOLS = frozenset({
-    "csf", "comp-vfunc", "phastr", "mmphf", "lemonhash",
+    "csf", "comp-vfunc", "mmphf", "lemonhash",
 })
 
 # --- Method definitions ---
@@ -341,9 +341,10 @@ METHODS = {
         "bits_agnostic": True,
         "build_threads": PARALLEL,
         "max_log2": 33,
-        # Compared against PHastR + array, whose build+query run in one process
-        # and therefore cannot be pinned.  Run VFunc queries unpinned
-        # too so the comparison is apples-to-apples.
+        # Compared against PHastR + array, whose build+query used to run in
+        # one process, which could not be pinned.  VFunc queries were run
+        # unpinned too so the comparison was apples-to-apples; we keep both
+        # unpinned, for consistency with the existing results.
         "pin_query": False,
     },
     "VFuncFullSigs": {
@@ -368,18 +369,23 @@ METHODS = {
     # PHastR (minimal perfect hash + array)
     # -----------------------------------------------------------------
     #
-    # bench_phastr_array (phastr-array crate) builds a PHastR + array
-    # function and queries it in-process.
+    # The structure is PHunc, from sux-rs: it is built with phunc and
+    # queried with bench_phunc, as VFunc is with vfunc and bench_vfunc.
     # Bits-agnostic (bits/key is a result metric).
-    # No separate build/query phases — construction and queries run in
-    # a single invocation.
-    #
-    # Run:  bench_phastr_array <n> <query_keys> <threads>
+    #   Build:  phunc -n <n> --unaligned --threads <t> <outfile>
+    #   Query:  bench_phunc <query_keys> <outfile> --unaligned
     "PHastR": {
-        "tool": "phastr",
+        "tool": "sux",
         "label": "PHastR",
+        "build_bin": "phunc",
+        "bench_bin": "bench_phunc",
+        "bits_agnostic": True,
+        # The values are in a padded bit-field vector, read unaligned
+        "unaligned": True,
         "build_threads": PARALLEL,
         "max_log2": 33,
+        # Unpinned queries, as for VFunc
+        "pin_query": False,
     },
     # -----------------------------------------------------------------
     # Monotone MMPHF methods (integer keys)

@@ -80,6 +80,5 @@ clean:
 	cd sux-rs && cargo clean 2>/dev/null || true
 	cd hem-vfilter && cargo clean 2>/dev/null || true
 	cd multi-vfilter && cargo clean 2>/dev/null || true
-	cd phastr-array && cargo clean 2>/dev/null || true
 
 .PHONY: all init clean

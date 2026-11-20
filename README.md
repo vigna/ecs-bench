@@ -32,8 +32,6 @@ live in the [`sux`](https://github.com/vigna/sux-rs) Rust crate.
   ablation (see below).
 - `multi-vfilter/`: BuRR's parallel query benchmark (`parbench.cpp`) ported to
   Rust for VFilter, used by `multi-bench`.
-- `phastr-array/`: a static function made of a PHastR minimal perfect hash
-  function and an array of values, which the paper compares with VFunc.
 - `bench_csf.cpp`, `bench_lemonhash.cpp`, `bench_lemonhash_str.cpp`: C++
   benches for BuRR-CSF (compressed static functions based on BuRR-VL and on the
   codes of `LearnedStaticFunction`) and for LeMonHash on integers and on
@@ -129,7 +127,7 @@ they stopped**, and successive `bench` invocations only execute the data
 points that aren't already complete. Pass `--force` to override.
 
 All binaries are built on demand by `run.py`: the sux-rs binaries and the
-`hem-vfilter`, `multi-vfilter`, and `phastr-array` crates (compiled with `cargo
+`hem-vfilter` and `multi-vfilter` crates (compiled with `cargo
 build --profile bench`), the Java `BenchBuilder` (via the Maven wrapper), the
 BuRR binaries (via BuRR's Makefile), `bench_csf`, `bench_lemonhash`, and
 `bench_lemonhash_str` (via the top-level `Makefile`), and the Sux4J C query
@@ -139,8 +137,8 @@ code (with `cc`, or `$CC`).
 
 By default, `run.py` uses the `sux-rs/` and `BuRR/` submodules; `--sux-dir`
 and `--burr-dir` select other checkouts. `--sux-dir` does not affect
-`hem-vfilter`, `multi-vfilter`, and `phastr-array`, which depend on `sux`
-through `path = "../sux-rs"` in their `Cargo.toml`, that is, always on the
+`hem-vfilter` and `multi-vfilter`, which depend on `sux` through
+`path = "../sux-rs"` in their `Cargo.toml`, that is, always on the
 submodule.
 
 `--results-dir` (default: `results`) and the output directory of `plot`
@@ -368,9 +366,12 @@ python3 bench/run.py bench --pin "taskset -c 2"
 
 The `--pin` prefix is applied to:
 
-- the query commands of all methods, except `VFunc` and `VFuncFullSigs`,
-  which are compared with `PHastR`, whose construction and queries run in a
-  single multi-threaded process, and are therefore queried unpinned too;
+- the query commands of all methods, except `VFunc`, `VFuncFullSigs`, and
+  `PHastR` (a PHastR minimal perfect hash function with an array of values,
+  that is, a `PHunc` of sux-rs, built with `phunc` and queried with
+  `bench_phunc`), which are queried unpinned: `PHastR` used to build and
+  query in a single multi-threaded process, and the functions it is compared
+  with were queried unpinned too;
 - the builds of the LCP-based monotone minimal perfect hash functions
   (`lcp_mmphf`, which runs single-threaded);
 - the whole runs of `LeMonHashInt` and `LeMonHashStr`, which build and query
@@ -378,8 +379,8 @@ The `--pin` prefix is applied to:
 
 All other builds run unpinned, including single-threaded ones such as those of
 `FuseAug3Shards-seq`, `BuRR-seq`, or `CompVFunc`, so that parallel
-construction is never artificially serialised. `PHastR` and `multi-bench`
-always run unpinned.
+construction is never artificially serialised. `multi-bench` always runs
+unpinned.
 
 ## Results layout
 
@@ -406,7 +407,7 @@ which bits/key is a result rather than a parameter.
 When building and querying are separate steps, a `.err` file contains the
 build output followed, after a `--- query ---` line, by the query output. The
 builder self-reports the space used by the structure, which is the canonical
-space number used by the paper: sux-rs, `hem-vfilter`, `phastr-array`, and
+space number used by the paper: sux-rs, `hem-vfilter`, and
 Sux4J log a `Bits/key: X.XXX` line; `bench_csf`, `bench_lemonhash`, and
 `bench_lemonhash_str` log a `Size: N Bytes = X bits/key` line; and BuRR logs a
 `Ribbon size: N Bytes = …` line, from which the framework computes bits/key

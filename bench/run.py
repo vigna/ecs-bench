@@ -4,7 +4,7 @@ Benchmark runner for the ε-cost sharding paper.
 
 Orchestrates build, query, and reporting for sux-rs (VFilter, VFunc,
 CompVFunc, LcpMmphf, Lcp2Mmphf), the HEM-sharded VFilter of hem-vfilter/,
-PHastR + array (phastr-array/), BuRR (bumped ribbon), CSF (compressed static
+PHastR + array (PHunc), BuRR (bumped ribbon), CSF (compressed static
 functions via BuRR-VL), LeMonHash (MMPHF-Experiments/), and Sux4J GOV3 (Java
 build, C query) benchmarks, plus the BuRR-style parallel query benchmark
 (multi-vfilter/ and BuRR's parbench).  Results are stored as individual files
@@ -97,7 +97,7 @@ def sux_target_dir(sux_dir):
     return Path(sux_dir) / "target"
 
 
-_PARSE_TOOL_MAP = {"csf": "burr", "comp-vfunc": "sux", "phastr": "sux",
+_PARSE_TOOL_MAP = {"csf": "burr", "comp-vfunc": "sux",
                    "mmphf": "sux", "lemonhash": "sux", "java": "sux",
                    "hem": "sux",
                    "mmphf-str": "sux", "lemonhash-str": "sux"}
@@ -249,8 +249,10 @@ def ensure_sux_built(sux_dir, need_comp_vfunc=False):
         "--features", SUX_FEATURES,
         "--bin", "vfilter",
         "--bin", "vfunc",
+        "--bin", "phunc",
         "--example", "bench_vfilter",
         "--example", "bench_vfunc",
+        "--example", "bench_phunc",
         "--bin", "comp_vfunc",
         "--example", "bench_comp_vfunc",
     ]
@@ -432,29 +434,6 @@ def ensure_hem_built():
     return True
 
 
-def phastr_array_target_dir():
-    """Return the cargo target directory of the phastr-array crate."""
-    return Path(REPO_ROOT) / "phastr-array" / "target"
-
-
-def ensure_phastr_array_built():
-    """Compile the PHastR + array static function compared with VFunc."""
-    crate = Path(REPO_ROOT) / "phastr-array"
-    if not crate.exists():
-        print("WARNING: phastr-array/ not found, skipping PHastR methods")
-        return False
-    print(f"Building phastr-array binaries in {crate}\u2026")
-    r = subprocess.run(
-        ["cargo", "build", "--profile", SUX_PROFILE],
-        cwd=str(crate), capture_output=True, text=True,
-    )
-    if r.returncode != 0:
-        print(r.stderr, file=sys.stderr)
-        print("WARNING: phastr-array build failed, skipping PHastR methods")
-        return False
-    return True
-
-
 def ensure_sux4j_c_built(bits_values):
     """Compile the Sux4J C test harnesses for the requested bit widths."""
     sux4j_c = Path(REPO_ROOT) / "Sux4J" / "c"
@@ -524,11 +503,15 @@ def sux_build_cmd(cfg, n, bits, outfile, args):
     target = sux_target_dir(args.sux_dir)
     cmd = [str(target / "release" / cfg["build_bin"])]
     cmd += ["-n", str(n)]
-    cmd += ["--shard-edge", cfg["shard_edge"]]
+    if "shard_edge" in cfg:
+        cmd += ["--shard-edge", cfg["shard_edge"]]
     if bits > 0:
         cmd += ["--bits", str(bits)]
         if args.unaligned and bits not in EVEN_BITS:
             cmd += ["--unaligned"]
+    # Methods that always use unaligned reads (PHastR + array)
+    if cfg.get("unaligned", False):
+        cmd += ["--unaligned"]
 
     # Per-method extras: --eps, --seed, etc.
     cmd += cfg.get("build_extra", [])
@@ -560,10 +543,13 @@ def sux_query_cmd(cfg, n, bits, infile, args):
     cmd = [str(target / "release" / "examples" / cfg["bench_bin"])]
     cmd += [str(cfg.get("query_keys", QUERY_KEYS))]
     cmd += [str(infile)]                 # serialized structure
-    cmd += ["--shard-edge", cfg["shard_edge"]]
+    if "shard_edge" in cfg:
+        cmd += ["--shard-edge", cfg["shard_edge"]]
     if bits > 0:
         cmd += ["--bits", str(bits)]
     if bits > 0 and args.unaligned and bits not in EVEN_BITS:
+        cmd += ["--unaligned"]
+    if cfg.get("unaligned", False):
         cmd += ["--unaligned"]
     return cmd
 
@@ -817,11 +803,6 @@ def cmd_bench(args):
         if any(METHODS[m]["tool"] == "hem" for m in methods):
             if not ensure_hem_built():
                 methods = [m for m in methods if METHODS[m]["tool"] != "hem"]
-        if any(METHODS[m]["tool"] == "phastr" for m in methods):
-            if not ensure_phastr_array_built():
-                methods = [m for m in methods
-                           if METHODS[m]["tool"] != "phastr"]
-
         if java_needed:
             java_ok = ensure_java_built()
             if java_ok:
@@ -917,9 +898,6 @@ def cmd_bench(args):
         elif cfg["tool"] == "burr":
             _bench_burr(cfg, method_name, n, bits, log2_n,
                         rdir, args)
-        elif cfg["tool"] == "phastr":
-            _bench_phastr(cfg, method_name, n, log2_n,
-                         rdir, args)
         elif cfg["tool"] == "mmphf":
             _bench_mmphf(cfg, method_name, n, log2_n,
                          rdir, args)
@@ -1041,35 +1019,6 @@ def _bench_comp_vfunc(cfg, method_name, n, log2_n, rdir, args):
     # --- Clean up ---
     if not args.keep_data and outfile.exists():
         outfile.unlink()
-
-
-def _bench_phastr(cfg, method_name, n, log2_n, rdir, args):
-    """Run a PHastR + array benchmark: build and query in one invocation.
-
-    bench_phastr_array <n> <query_keys> <threads>
-    (five repetitions, the default of the binary). Output (construction +
-    queries) goes to stderr.
-    """
-    cmd = [str(phastr_array_target_dir() / "release" / "bench_phastr_array")]
-    cmd += [str(n), str(cfg.get("query_keys", QUERY_KEYS))]
-
-    threads = build_threads(cfg, "build_threads", args)
-    cmd += [str(threads or 1)]
-
-    # PHastR + array builds and queries in a single process, so we run unpinned
-    # (pinning would force multi-threaded construction onto one core).
-    print(f"  bench {method_name} n=2^{log2_n}")
-    result = run_cmd(cmd, dry_run=args.dry_run)
-
-    if args.dry_run:
-        return
-
-    if result.returncode != 0:
-        (rdir / f"bench.{n}.0.err").write_text(
-            (result.stdout or "") + (result.stderr or ""))
-        return
-
-    (rdir / f"bench.{n}.0.err").write_text(result.stderr)
 
 
 def _bench_mmphf(cfg, method_name, n, log2_n, rdir, args):
@@ -1471,7 +1420,7 @@ def ensure_burr_parbench_built(burr_dir, bits_values):
 def multi_func(cfg):
     """The --func argument of multi_vfilter for the static functions that
     multi-bench can run (VFunc and PHastR + array), or None."""
-    if cfg["tool"] == "phastr":
+    if cfg["tool"] == "sux" and cfg.get("build_bin") == "phunc":
         return "phastr"
     if cfg["tool"] == "sux" and cfg.get("build_bin") == "vfunc" and \
             cfg.get("shard_edge") == "fuse-aug3-shards":
@@ -1675,7 +1624,7 @@ def cmd_multi_bench(args):
                 burr_slots(METHODS[method_name], n, args.burr_eps)
 
     if not args.dry_run:
-        if any(METHODS[m]["tool"] in ("sux", "phastr") for m in methods):
+        if any(METHODS[m]["tool"] == "sux" for m in methods):
             ensure_multi_built()
         if any(METHODS[m]["tool"] == "burr" for m in methods):
             ensure_burr_parbench_built(args.burr_dir, bits_list)
