@@ -1993,14 +1993,30 @@ def _figure_series(fig_cfg, bits, args):
                 result.append((method_name, pos,
                                name if pos is None else f"{name}, {b} bits",
                                linestyle, points))
-    # Methods drawn again from the results of a vectorized campaign, with
+    # Methods drawn again from the results of a vectorized campaign
+    # ("vec_methods", from --vec-results-dir) or of a campaign with the loop
+    # vectorizer disabled ("novec_methods", from --novec-results-dir), with
     # the same style but dashed
-    vec_dir = getattr(args, "vec_results_dir", None)
-    for method_name, vec_label in fig_cfg.get("vec_methods", {}).items():
-        cfg = METHODS.get(method_name)
-        if vec_dir is None or cfg is None:
+    # ("novec_bits" restricts the latter to some bit widths)
+    for key, dir_arg in (("vec_methods", "vec_results_dir"),
+                         ("novec_methods", "novec_results_dir")):
+        if key == "novec_methods" and bits not in fig_cfg.get("novec_bits", [bits]):
             continue
-        rdir = Path(vec_dir) / method_name
+        result += _figure_other_series(fig_cfg, fig_cfg.get(key, {}),
+                                       getattr(args, dir_arg, None), bits, args)
+    return result
+
+
+def _figure_other_series(fig_cfg, methods, other_dir, bits, args):
+    """The dashed series of a figure preset drawn from the results of
+    another campaign, in other_dir, for the methods of a dictionary mapping
+    each method to its label."""
+    result = []
+    for method_name, vec_label in methods.items():
+        cfg = METHODS.get(method_name)
+        if other_dir is None or cfg is None:
+            continue
+        rdir = Path(other_dir) / method_name
         if not rdir.exists():
             continue
         tool_for_parse = _parse_tool(cfg["tool"])
@@ -2804,6 +2820,10 @@ def make_parser():
                    help="Path to the results directory of a campaign with "
                         "auto-vectorization enabled, used by plot for the "
                         "methods listed in the \"vec_methods\" of a figure")
+    p.add_argument("--novec-results-dir", default=None,
+                   help="Path to the results directory of a campaign with the "
+                        "loop vectorizer disabled, used by plot for the "
+                        "methods listed in the \"novec_methods\" of a figure")
     p.add_argument("--pin", default=os.environ.get("BENCH_PIN"),
                    help="CPU-pinning prefix, e.g. 'taskset -c 2' (ignored by "
                         "multi-bench)")

@@ -631,8 +631,12 @@ FIGURES = {
             "PHuncBits",
         ],
         # Methods drawn again, dashed, from the results of --vec-results-dir
-        # (a campaign with auto-vectorization enabled)
+        # (a campaign with auto-vectorization enabled), or of
+        # --novec-results-dir (loop vectorizer disabled) for the widths of
+        # "novec_bits"
         "vec_methods": {"FuseAug3Shards": "VFilter(Fuse+Aug)-vec"},
+        "novec_methods": {"FuseAug3Shards": "VFilter(Fuse+Aug)-novec"},
+        "novec_bits": [9, 17, 33],
         "column": "query_min",
         "ylabel": "ns/key",
     },
@@ -654,8 +658,10 @@ FIGURES = {
         # a single line of non-keys, as in the other query figures
         "method_columns": {"FuseAug3Shards": [("multi_neg", "", "-")],
                            "PHuncBits": [("multi_neg", "", "-")]},
-        # Drawn again, dashed, from the results of --vec-results-dir
+        # Drawn again, dashed, from the results of --vec-results-dir or of
+        # --novec-results-dir
         "vec_methods": {"FuseAug3Shards": "VFilter-vec"},
+        "novec_methods": {"FuseAug3Shards": "VFilter-novec"},
         "ylabel": "ns/key",
         # Room for the legend above the flat BuRR-pos lines
         "ymax_factor": 1.5,
@@ -731,8 +737,11 @@ FIGURES = {
         "title": "Index Function Queries",
         "style_group": "phast",
         "methods": ["PHunc", "VFunc", "BuRRFunc"],
-        # VFunc drawn again, dashed, from the results of --vec-results-dir
+        # VFunc drawn again, dashed, from the results of --vec-results-dir,
+        # or of --novec-results-dir (loop vectorizer disabled); the other
+        # functions are not affected by auto-vectorization
         "vec_methods": {"VFunc": "VFunc(Fuse+Aug)-vec"},
+        "novec_methods": {"VFunc": "VFunc(Fuse+Aug)-novec"},
         "column": "query_min",
         "ylabel": "ns/key",
     },
@@ -743,6 +752,7 @@ FIGURES = {
         "style_group": "phast",
         "methods": ["PHunc", "VFunc", "BuRRFunc"],
         "vec_methods": {"VFunc": "VFunc(Fuse+Aug)-vec"},
+        "novec_methods": {"VFunc": "VFunc(Fuse+Aug)-novec"},
         "column": "multi_pos",
         "ylabel": "ns/key",
     },
