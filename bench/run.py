@@ -413,18 +413,19 @@ def list_datasets():
     )
 
 
-def ensure_mmphf_built(sux_dir):
-    """Ensure lcp_mmphf and bench_lcp_mmphf are built in sux-rs."""
+def ensure_mmphf_built(sux_dir, novec=False):
+    """Ensure lcp_mmphf and bench_lcp_mmphf are built in sux-rs (with novec,
+    with the loop vectorizer disabled, see cargo_build)."""
     sux = Path(sux_dir)
-    print(f"Building lcp_mmphf + bench_lcp_mmphf in {sux}…")
+    print(f"Building lcp_mmphf + bench_lcp_mmphf{' (novec)' if novec else ''} "
+          f"in {sux}…")
     cmd = [
-        "cargo", "build",
         "--profile", SUX_PROFILE,
         "--features", SUX_FEATURES,
         "--bin", "lcp_mmphf",
         "--example", "bench_lcp_mmphf",
     ]
-    r = subprocess.run(cmd, cwd=str(sux), capture_output=True, text=True)
+    r = cargo_build(sux, cmd, novec)
     if r.returncode != 0:
         print(r.stderr, file=sys.stderr)
         sys.exit(f"cargo build failed for lcp_mmphf (exit {r.returncode})")
@@ -836,6 +837,9 @@ def cmd_bench(args):
             ensure_sux_built(args.sux_dir, novec=True)
         if mmphf_needed or mmphf_str_needed:
             ensure_mmphf_built(args.sux_dir)
+        if any(METHODS[m].get("novec") and METHODS[m]["tool"] == "mmphf"
+               for m in methods):
+            ensure_mmphf_built(args.sux_dir, novec=True)
         if burr_needed:
             burr_ok = ensure_burr_built(args.burr_dir, bits_list,
                                         burr_targets(methods))
@@ -1082,7 +1086,7 @@ def _bench_mmphf(cfg, method_name, n, log2_n, rdir, args):
     Query:  bench_lcp_mmphf <query_keys> <outfile> [--unaligned] [-2]
             --repeats 5
     """
-    target = sux_target_dir(args.sux_dir)
+    target = sux_target_dir(args.sux_dir, cfg.get("novec", False))
     ddir = data_dir(args.results_dir, method_name)
     outfile = ddir / f"func.{n}.bin"
 

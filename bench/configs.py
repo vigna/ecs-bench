@@ -592,7 +592,9 @@ METHODS = {
 # same as the methods they are derived from, drawn with the same style but
 # dashed. Only the query times of these methods appear in the figures.
 for _base, _label in (("FuseAug3Shards", "VFilter(Fuse+Aug)-novec"),
-                      ("VFunc", "VFunc(Fuse+Aug)-novec")):
+                      ("VFunc", "VFunc(Fuse+Aug)-novec"),
+                      ("LcpMmphfInt", "LcpMmphf(int)-novec"),
+                      ("Lcp2MmphfInt", "Lcp2Mmphf(int)-novec")):
     METHODS[f"{_base}-novec"] = {
         **METHODS[_base],
         "label": _label,
@@ -785,7 +787,8 @@ FIGURES = {
     "mmphf-query": {
         "title": "Monotone MMPHF Queries",
         "style_group": "mmphf",
-        "methods": ["LcpMmphfInt", "Lcp2MmphfInt", "LeMonHashInt"],
+        "methods": ["LcpMmphfInt", "Lcp2MmphfInt", "LeMonHashInt",
+                    "LcpMmphfInt-novec", "Lcp2MmphfInt-novec"],
         "column": "query_min",
         "ylabel": "ns/key",
     },
