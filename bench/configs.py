@@ -258,7 +258,10 @@ METHODS = {
         "burr_threads": PARALLEL,
         "bits_agnostic": True,
         "index_values": True,
-        "max_log2": 33,
+        # With 2^33 keys, both the single construction and the parallel
+        # test run out of memory on a 384 GiB machine (killed at 390 GB
+        # resident): the input and its copy of hashes are key-value pairs
+        "max_log2": 32,
         # Unpinned queries, as for VFunc and PHunc
         "pin_query": False,
     },
