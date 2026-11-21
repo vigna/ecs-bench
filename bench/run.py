@@ -318,9 +318,23 @@ def ensure_burr_built(burr_dir, bits_values, targets=("bench",)):
 
 
 def burr_targets(methods):
-    """The BuRR Makefile targets needed by a list of methods."""
+    """The BuRR Makefile targets needed by a list of methods, except for
+    those of methods with index values (see index_bits)."""
     return sorted({METHODS[m]["burr_binary"] for m in methods
-                   if METHODS[m]["tool"] == "burr"})
+                   if METHODS[m]["tool"] == "burr"
+                   and not METHODS[m].get("index_values")})
+
+
+def index_bits(n):
+    """The width of the values of a function mapping each of the n keys
+    [0 . . n) to itself (⌈lg n⌉ bits, at least one), which is the width
+    compiled into the BuRR binaries of methods with "index_values"."""
+    return max(1, (n - 1).bit_length())
+
+
+def burr_bits(cfg, n, bits):
+    """The width compiled into the BuRR binary of a method for n keys."""
+    return index_bits(n) if cfg.get("index_values") else bits
 
 
 def ensure_lemonhash_built():
@@ -565,7 +579,7 @@ def burr_bench_cmd(cfg, n, bits, args, serialize_to=None):
         bench8 -t 32 -L 64 -2 -I -n 1048576 -w output.bin
     """
     burr = Path(args.burr_dir)
-    binary = f"{cfg['burr_binary']}{bits}"
+    binary = f"{cfg['burr_binary']}{burr_bits(cfg, n, bits)}"
     cmd = [str(burr / binary)]
 
     threads = build_threads(cfg, "burr_threads", args, default=1)
@@ -590,7 +604,7 @@ def burr_query_cmd(cfg, n, bits, infile, args):
         bench8 -t 1 -L 64 -2 -I -n 1048576 -r input.bin
     """
     burr = Path(args.burr_dir)
-    binary = f"{cfg['burr_binary']}{bits}"
+    binary = f"{cfg['burr_binary']}{burr_bits(cfg, n, bits)}"
     cmd = [str(burr / binary)]
     cmd += ["-t", "1"]
     cmd += cfg["burr_flags"]
@@ -795,6 +809,14 @@ def cmd_bench(args):
         if burr_needed:
             burr_ok = ensure_burr_built(args.burr_dir, bits_list,
                                         burr_targets(methods))
+            # Methods with index values need a binary for each width
+            for m in methods:
+                cfg = METHODS[m]
+                if burr_ok and cfg["tool"] == "burr" and cfg.get("index_values"):
+                    widths = [index_bits(1 << l) for l in
+                              range(MIN_LOG2, effective_max_log2(args, cfg) + 1)]
+                    burr_ok = ensure_burr_built(args.burr_dir, widths,
+                                                (cfg["burr_binary"],))
         if csf_needed:
             csf_ok = ensure_csf_built()
         if lemonhash_needed:
@@ -941,12 +963,13 @@ def _bench_burr(cfg, method_name, n, bits, log2_n, rdir, args):
     print(f"  bench {method_name} n=2^{log2_n}{bits_str}")
     result = run_cmd(cmd, dry_run=args.dry_run)
 
-    # --- Query (deserialize, single-threaded, pinned) ---
+    # --- Query (deserialize, single-threaded, pinned by default) ---
     qr = None
     if not cfg.get("no_queries"):
         qcmd = burr_query_cmd(cfg, n, bits, outfile, args)
         if args.dry_run or result.returncode == 0:
-            qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
+            pin = args.pin if cfg.get("pin_query", True) else None
+            qr = run_cmd(qcmd, pin=pin, dry_run=args.dry_run)
 
     if args.dry_run:
         return
@@ -1388,8 +1411,9 @@ def ensure_multi_built():
         sys.exit(f"multi-vfilter build failed (exit {r.returncode})")
 
 
-def ensure_burr_parbench_built(burr_dir, bits_values):
-    """Compile BuRR's parbench for each requested bit width.
+def ensure_burr_parbench_built(burr_dir, bits_values, target="parbench"):
+    """Compile BuRR's parbench (or the given variant) for each requested bit
+    width.
 
     As in ensure_burr_built, the binary (e.g., parbench8) is rebuilt only
     if it is older than some source file.
@@ -1403,14 +1427,14 @@ def ensure_burr_parbench_built(burr_dir, bits_values):
         default=0.0,
     )
     for bits in bits_values:
-        binary = burr / f"parbench{bits}"
+        binary = burr / f"{target}{bits}"
         if binary.exists() and binary.stat().st_mtime >= src_mtime:
             continue
-        print(f"Building BuRR parbench{bits} in {burr}…")
+        print(f"Building BuRR {target}{bits} in {burr}…")
         r = subprocess.run(
             ["make", f"RIBBON_BITS={bits}",
              "OPTFLAGS=-O3 -DNDEBUG -march=native -fPIE -fno-strict-aliasing",
-             "parbench"],
+             target],
             cwd=str(burr), capture_output=True, text=True,
         )
         if r.returncode != 0:
@@ -1433,7 +1457,8 @@ def multi_func(cfg):
 def multi_bits_agnostic(cfg):
     """Whether a method of multi-bench runs once, with bits 0, whatever the
     bit widths requested (the functions mapping each key to its index)."""
-    return multi_func(cfg) is not None and cfg.get("bits_agnostic", False)
+    return (multi_func(cfg) is not None or cfg.get("index_values", False)) \
+        and cfg.get("bits_agnostic", False)
 
 
 def multi_methods(arg):
@@ -1448,8 +1473,10 @@ def multi_methods(arg):
             if arg != "all":
                 sys.exit(f"multi-bench: {name} does not run queries")
             continue
-        # parbench measures positive and negative queries in the same run
-        if cfg["tool"] == "burr" and cfg["burr_binary"] != "bench":
+        # parbench measures positive and negative queries in the same run;
+        # methods with a "multi_binary" have their own parbench variant
+        if cfg["tool"] == "burr" and cfg["burr_binary"] != "bench" and \
+                "multi_binary" not in cfg:
             if arg != "all":
                 sys.exit(f"multi-bench: use BuRR instead of {name}")
             continue
@@ -1507,7 +1534,8 @@ def multi_cmd(cfg, n, bits, k, q, t, b, args):
     else:
         burr = Path(args.burr_dir)
         f, width = burr_eps_numerator(cfg, args.burr_eps)
-        cmd = [str(burr / f"parbench{bits}")]
+        binary = cfg.get("multi_binary", "parbench")
+        cmd = [str(burr / f"{binary}{burr_bits(cfg, n, bits)}")]
         cmd += ["-t", str(t), "-b", str(b)]
         cmd += cfg["burr_flags"]
         cmd += ["-e", repr(-f / width)]
@@ -1635,8 +1663,15 @@ def cmd_multi_bench(args):
     if not args.dry_run:
         if any(METHODS[m]["tool"] == "sux" for m in methods):
             ensure_multi_built()
-        if any(METHODS[m]["tool"] == "burr" for m in methods):
+        if any(METHODS[m]["tool"] == "burr" and "multi_binary" not in METHODS[m]
+               for m in methods):
             ensure_burr_parbench_built(args.burr_dir, bits_list)
+        for m in methods:
+            cfg = METHODS[m]
+            if cfg["tool"] == "burr" and "multi_binary" in cfg:
+                ensure_burr_parbench_built(
+                    args.burr_dir, sorted({burr_bits(cfg, n, 0) for n, _ in configs}),
+                    cfg["multi_binary"])
 
     # Functions are bits-agnostic: they run once, with bits 0
     func_done = set()
@@ -2817,9 +2852,9 @@ def make_parser():
                                     "pinned, and thread counts are set by "
                                     "--build-threads and --query-threads.")
     mb.add_argument("--method",
-                    default="FuseAug3Shards,BuRR,VFunc,PHunc,PHuncBits",
+                    default="FuseAug3Shards,BuRR,VFunc,PHunc,PHuncBits,BuRRFunc",
                     help="Method name(s), comma-separated, or 'all' "
-                         "(default: FuseAug3Shards,BuRR,VFunc,PHunc,PHuncBits)")
+                         "(default: FuseAug3Shards,BuRR,VFunc,PHunc,PHuncBits,BuRRFunc)")
     mb.add_argument("--bits", default="all",
                     help="Bit widths: 'all' (default), 'even', 'odd', or "
                          "comma-separated ints")

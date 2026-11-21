@@ -361,8 +361,7 @@ for each key, in place of the index of the key: it appears as PHunc in the
 filter figures and in the filter table, with `PHuncBits-seq` for its
 single-threaded construction. In `multi-bench` it is queried as a filter
 (the value of a key is a hash of the key, and a query checks it), so it has
-negative queries, too. `bench/phunc-campaign.sh` runs all the experiments on
-`PHunc` and `PHuncBits` on the machine of the paper, with both builds.
+negative queries, too.
 
 ### CPU pinning
 

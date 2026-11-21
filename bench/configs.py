@@ -242,6 +242,26 @@ METHODS = {
         "style_as": "BuRR",
         "linestyle": ":",
     },
+    "BuRRFunc": {
+        "tool": "burr",
+        "label": "BuRR",
+        # A BuRR static function (retrieval data structure, BuRR with
+        # kIsFilter = false), not a filter: key i is mapped to i using
+        # ⌈lg n⌉ bits, as for VFunc and PHunc in the phast-* figures.
+        # benchretr<w> is ribbon.cpp compiled with -DRIBBON_RETRIEVAL and
+        # RIBBON_BITS=w, where w = ⌈lg n⌉ (see "index_values"); queries on
+        # keys compute the value without comparing it, as BuRR-func does.
+        # multi-bench uses parbenchretr<w>, with positive queries only.
+        "burr_binary": "benchretr",
+        "multi_binary": "parbenchretr",
+        "burr_flags": ["-L", "64", "-2", "-I"],
+        "burr_threads": PARALLEL,
+        "bits_agnostic": True,
+        "index_values": True,
+        "max_log2": 33,
+        # Unpinned queries, as for VFunc and PHunc
+        "pin_query": False,
+    },
     "BuRR-seq": {
         "tool": "burr",
         "label": "BuRR(seq)",
@@ -559,12 +579,12 @@ METHODS = {
 
 # The first methods of a style group, in order: they keep their styles when
 # new methods are added to the presets of the group (the other methods
-# follow, in order of first appearance).
+# follow, in order of first appearance). Methods with "style_as" must not be
+# listed, as they take no style of their own.
 STYLE_ORDER = {
     "filter": [
         "Fuse3NoShards64", "Fuse3NoShards128", "FuseAug3Shards", "Mwhc3",
-        "BuRR", "FuseAug3Shards-seq", "BuRR-seq", "HemVFilter", "BuRR-pos",
-        "BuRR-func",
+        "BuRR", "FuseAug3Shards-seq", "BuRR-seq", "HemVFilter",
     ],
 }
 
@@ -698,16 +718,16 @@ FIGURES = {
     # --- PHunc comparison: no bit width suffix ---
     # Bits-agnostic: phast-build.pdf, phast-query.pdf.
     "phast-build": {
-        "title": "PHunc vs VFunc Construction",
+        "title": "Index Function Construction",
         "style_group": "phast",
-        "methods": ["PHunc", "VFunc"],
+        "methods": ["PHunc", "VFunc", "BuRRFunc"],
         "column": "constr_ns",
         "ylabel": "ns/key",
     },
     "phast-query": {
-        "title": "PHunc vs VFunc Queries",
+        "title": "Index Function Queries",
         "style_group": "phast",
-        "methods": ["PHunc", "VFunc"],
+        "methods": ["PHunc", "VFunc", "BuRRFunc"],
         # VFunc drawn again, dashed, from the results of --vec-results-dir
         "vec_methods": {"VFunc": "VFunc(Fuse+Aug)-vec"},
         "column": "query_min",
@@ -716,9 +736,9 @@ FIGURES = {
     # BuRR-style parallel queries (multi-bench) of the static functions:
     # 2^33 / n functions of n keys, queried at random by all threads
     "phast-multiquery": {
-        "title": "PHunc vs VFunc Parallel Queries",
+        "title": "Index Function Parallel Queries",
         "style_group": "phast",
-        "methods": ["PHunc", "VFunc"],
+        "methods": ["PHunc", "VFunc", "BuRRFunc"],
         "vec_methods": {"VFunc": "VFunc(Fuse+Aug)-vec"},
         "column": "multi_pos",
         "ylabel": "ns/key",
