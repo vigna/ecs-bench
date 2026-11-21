@@ -51,6 +51,14 @@ PARALLEL = "parallel"
 
 SUX_FEATURES = "cli,mwhc,rayon,epserde,deko"
 
+# The Rust flags of the methods with "novec": the loop vectorizer of LLVM is
+# disabled, so that the queries of a benchmark loop are computed one at a
+# time, rather than several at a time with vector instructions (the SLP
+# vectorizer is still enabled). They are built in their own target
+# directories (see sux_target_dir in run.py). target-cpu=native must be
+# repeated, as RUSTFLAGS replaces the flags of .cargo/config.toml.
+NOVEC_RUSTFLAGS = "-C target-cpu=native -C llvm-args=-vectorize-loops=false"
+
 # Cargo profile used for benchmark builds.
 SUX_PROFILE = "bench"
 
@@ -580,6 +588,19 @@ METHODS = {
 #   "ymax_factor": ratio between the upper limit of the vertical axis and
 #                  the largest value (by default, 1.15).
 
+# Methods built with the loop vectorizer disabled (see NOVEC_RUSTFLAGS): the
+# same as the methods they are derived from, drawn with the same style but
+# dashed. Only the query times of these methods appear in the figures.
+for _base, _label in (("FuseAug3Shards", "VFilter(Fuse+Aug)-novec"),
+                      ("VFunc", "VFunc(Fuse+Aug)-novec")):
+    METHODS[f"{_base}-novec"] = {
+        **METHODS[_base],
+        "label": _label,
+        "novec": True,
+        "style_as": _base,
+        "linestyle": "--",
+    }
+
 # The first methods of a style group, in order: they keep their styles when
 # new methods are added to the presets of the group (the other methods
 # follow, in order of first appearance). Methods with "style_as" must not be
@@ -629,14 +650,13 @@ FIGURES = {
             "BuRR-pos",
             "BuRR-func",
             "PHuncBits",
+            "FuseAug3Shards-novec",
         ],
         # Methods drawn again, dashed, from the results of --vec-results-dir
-        # (a campaign with auto-vectorization enabled), or of
-        # --novec-results-dir (loop vectorizer disabled) for the widths of
-        # "novec_bits"
+        # (a campaign with auto-vectorization enabled)
         "vec_methods": {"FuseAug3Shards": "VFilter(Fuse+Aug)-vec"},
-        "novec_methods": {"FuseAug3Shards": "VFilter(Fuse+Aug)-novec"},
-        "novec_bits": [9, 17, 33],
+        # Methods drawn only at some widths
+        "method_bits": {"FuseAug3Shards-novec": [9, 17, 33]},
         "column": "query_min",
         "ylabel": "ns/key",
     },
@@ -647,21 +667,22 @@ FIGURES = {
         "title": "Filter Parallel Queries ({bits} bits)",
         "style_group": "filter",
         "legend_loc": "upper left",
-        "labels": {"FuseAug3Shards": "VFilter"},
+        "labels": {"FuseAug3Shards": "VFilter",
+                   "FuseAug3Shards-novec": "VFilter-novec"},
         "methods": [
             "FuseAug3Shards",
             "BuRR",
             "PHuncBits",
+            "FuseAug3Shards-novec",
         ],
         "columns": [("multi_neg", "-neg", "-"), ("multi_pos", "-pos", "--")],
         # VFilter and PHunc cost the same on keys and non-keys, so they get
         # a single line of non-keys, as in the other query figures
         "method_columns": {"FuseAug3Shards": [("multi_neg", "", "-")],
-                           "PHuncBits": [("multi_neg", "", "-")]},
-        # Drawn again, dashed, from the results of --vec-results-dir or of
-        # --novec-results-dir
+                           "PHuncBits": [("multi_neg", "", "-")],
+                           "FuseAug3Shards-novec": [("multi_neg", "", "--")]},
+        # Drawn again, dashed, from the results of --vec-results-dir
         "vec_methods": {"FuseAug3Shards": "VFilter-vec"},
-        "novec_methods": {"FuseAug3Shards": "VFilter-novec"},
         "ylabel": "ns/key",
         # Room for the legend above the flat BuRR-pos lines
         "ymax_factor": 1.5,
@@ -736,12 +757,9 @@ FIGURES = {
     "phast-query": {
         "title": "Index Function Queries",
         "style_group": "phast",
-        "methods": ["PHunc", "VFunc", "BuRRFunc"],
-        # VFunc drawn again, dashed, from the results of --vec-results-dir,
-        # or of --novec-results-dir (loop vectorizer disabled); the other
-        # functions are not affected by auto-vectorization
+        "methods": ["PHunc", "VFunc", "BuRRFunc", "VFunc-novec"],
+        # VFunc drawn again, dashed, from the results of --vec-results-dir
         "vec_methods": {"VFunc": "VFunc(Fuse+Aug)-vec"},
-        "novec_methods": {"VFunc": "VFunc(Fuse+Aug)-novec"},
         "column": "query_min",
         "ylabel": "ns/key",
     },
@@ -750,9 +768,8 @@ FIGURES = {
     "phast-multiquery": {
         "title": "Index Function Parallel Queries",
         "style_group": "phast",
-        "methods": ["PHunc", "VFunc", "BuRRFunc"],
+        "methods": ["PHunc", "VFunc", "BuRRFunc", "VFunc-novec"],
         "vec_methods": {"VFunc": "VFunc(Fuse+Aug)-vec"},
-        "novec_methods": {"VFunc": "VFunc(Fuse+Aug)-novec"},
         "column": "multi_pos",
         "ylabel": "ns/key",
     },

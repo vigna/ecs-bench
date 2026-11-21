@@ -42,6 +42,7 @@ Environment variables:
 
 import argparse
 import itertools
+import json
 import math
 import os
 import shlex
@@ -62,6 +63,7 @@ from configs import (  # noqa: E402
     FIGURES,
     METHODS,
     MIN_LOG2,
+    NOVEC_RUSTFLAGS,
     ODD_BITS,
     PARALLEL,
     STYLE_ORDER,
@@ -82,20 +84,46 @@ REPO_ROOT = str(Path(__file__).resolve().parent.parent)
 # =====================================================================
 
 
-def sux_target_dir(sux_dir):
+def sux_target_dir(sux_dir, novec=False):
     """Return the cargo target directory for the sux-rs crate.
 
     Respects CARGO_TARGET_DIR if set (resolved relative to sux_dir,
     matching cargo's behavior when invoked from that directory).
-    Falls back to <sux_dir>/target.
+    Falls back to <sux_dir>/target. The binaries built with the loop
+    vectorizer disabled (novec) go to the same directory with the suffix
+    -novec.
     """
     v = os.environ.get("CARGO_TARGET_DIR")
     if v:
         p = Path(v)
         if not p.is_absolute():
             p = Path(sux_dir) / p
-        return p
-    return Path(sux_dir) / "target"
+    else:
+        p = Path(sux_dir) / "target"
+    return p.with_name(p.name + "-novec") if novec else p
+
+
+def cargo_build(crate, args, novec=False):
+    """Run cargo build in a crate with the given arguments; with novec, the
+    loop vectorizer is disabled (see NOVEC_RUSTFLAGS) and the binaries go
+    to the -novec target directory, whose compiler flags are then
+    checked."""
+    cmd = ["cargo", "build"] + args
+    env = None
+    if novec:
+        target = sux_target_dir(crate, novec=True)
+        cmd += ["--target-dir", str(target)]
+        env = dict(os.environ, RUSTFLAGS=NOVEC_RUSTFLAGS)
+    r = subprocess.run(cmd, cwd=str(crate), capture_output=True, text=True,
+                       env=env)
+    if r.returncode == 0 and novec:
+        # The flags recorded by cargo for the binaries just built
+        expected = NOVEC_RUSTFLAGS.split()
+        for f in (target / "release" / ".fingerprint").glob("*/bin-*.json"):
+            flags = json.loads(f.read_text()).get("rustflags")
+            if flags != expected:
+                sys.exit(f"{f} was built with flags {flags}, not {expected}")
+    return r
 
 
 _PARSE_TOOL_MAP = {"csf": "burr", "comp-vfunc": "sux",
@@ -235,17 +263,17 @@ def size_check(outfile, n, text):
 # =====================================================================
 
 
-def ensure_sux_built(sux_dir, need_comp_vfunc=False):
-    """Compile the sux-rs binaries.
+def ensure_sux_built(sux_dir, need_comp_vfunc=False, novec=False):
+    """Compile the sux-rs binaries (with novec, with the loop vectorizer
+    disabled, see cargo_build).
 
     Always runs cargo build (which rebuilds only what is out of date) with
     the bench profile and the feature set needed for all current
     benchmarks.
     """
     sux = Path(sux_dir)
-    print(f"Building sux-rs binaries in {sux}…")
+    print(f"Building sux-rs binaries{' (novec)' if novec else ''} in {sux}…")
     cmd = [
-        "cargo", "build",
         "--profile", SUX_PROFILE,
         "--features", SUX_FEATURES,
         "--bin", "vfilter",
@@ -257,7 +285,7 @@ def ensure_sux_built(sux_dir, need_comp_vfunc=False):
         "--bin", "comp_vfunc",
         "--example", "bench_comp_vfunc",
     ]
-    r = subprocess.run(cmd, cwd=str(sux), capture_output=True, text=True)
+    r = cargo_build(sux, cmd, novec)
     if r.returncode != 0:
         print(r.stderr, file=sys.stderr)
         sys.exit(f"cargo build failed (exit {r.returncode})")
@@ -515,7 +543,7 @@ def sux_build_cmd(cfg, n, bits, outfile, args):
     For power-of-2 widths (8, 16, 32) the backend is a boxed slice of
     the matching primitive, which is inherently aligned.
     """
-    target = sux_target_dir(args.sux_dir)
+    target = sux_target_dir(args.sux_dir, cfg.get("novec", False))
     cmd = [str(target / "release" / cfg["build_bin"])]
     cmd += ["-n", str(n)]
     if "shard_edge" in cfg:
@@ -554,7 +582,7 @@ def sux_query_cmd(cfg, n, bits, infile, args):
         bench_vfilter 100000000 output.bin --shard-edge fuse-aug3-shards
                       --bits 9 --unaligned
     """
-    target = sux_target_dir(args.sux_dir)
+    target = sux_target_dir(args.sux_dir, cfg.get("novec", False))
     cmd = [str(target / "release" / "examples" / cfg["bench_bin"])]
     cmd += [str(cfg.get("query_keys", QUERY_KEYS))]
     cmd += [str(infile)]                 # serialized structure
@@ -804,6 +832,8 @@ def cmd_bench(args):
     if not args.dry_run:
         if sux_needed or comp_vfunc_needed:
             ensure_sux_built(args.sux_dir, need_comp_vfunc=comp_vfunc_needed)
+        if any(METHODS[m].get("novec") for m in methods):
+            ensure_sux_built(args.sux_dir, novec=True)
         if mmphf_needed or mmphf_str_needed:
             ensure_mmphf_built(args.sux_dir)
         if burr_needed:
@@ -1390,22 +1420,20 @@ MULTI_SHARD_EDGES = ("fuse-aug3-shards", "fuse3-no-shards64",
 MULTI_TOTAL_LOG2 = 33
 
 
-def multi_target_dir():
+def multi_target_dir(novec=False):
     """Return the cargo target directory of the multi-vfilter crate.
 
     Respects CARGO_TARGET_DIR, as sux_target_dir does.
     """
-    return sux_target_dir(Path(REPO_ROOT) / "multi-vfilter")
+    return sux_target_dir(Path(REPO_ROOT) / "multi-vfilter", novec)
 
 
-def ensure_multi_built():
-    """Compile the BuRR-style parallel benchmark for VFilter."""
+def ensure_multi_built(novec=False):
+    """Compile the BuRR-style parallel benchmark for VFilter (with novec,
+    with the loop vectorizer disabled, see cargo_build)."""
     crate = Path(REPO_ROOT) / "multi-vfilter"
-    print(f"Building multi-vfilter in {crate}…")
-    r = subprocess.run(
-        ["cargo", "build", "--profile", SUX_PROFILE],
-        cwd=str(crate), capture_output=True, text=True,
-    )
+    print(f"Building multi-vfilter{' (novec)' if novec else ''} in {crate}…")
+    r = cargo_build(crate, ["--profile", SUX_PROFILE], novec)
     if r.returncode != 0:
         print(r.stderr, file=sys.stderr)
         sys.exit(f"multi-vfilter build failed (exit {r.returncode})")
@@ -1520,12 +1548,14 @@ def multi_cmd(cfg, n, bits, k, q, t, b, args):
     func = multi_func(cfg)
     if func is not None:
         # Bits-agnostic functions (bits is zero) have only positive queries
-        cmd = [str(multi_target_dir() / "release" / "multi-vfilter")]
+        cmd = [str(multi_target_dir(cfg.get("novec", False)) / "release" /
+                   "multi-vfilter")]
         cmd += ["-n", str(n), "-k", str(k), "-q", str(q),
                 "-t", str(t), "-b", str(b), "--bits", str(bits),
                 "--func", func]
     elif cfg["tool"] == "sux":
-        cmd = [str(multi_target_dir() / "release" / "multi-vfilter")]
+        cmd = [str(multi_target_dir(cfg.get("novec", False)) / "release" /
+                   "multi-vfilter")]
         cmd += ["-n", str(n), "-k", str(k), "-q", str(q),
                 "-t", str(t), "-b", str(b)]
         cmd += ["--bits", str(bits), "--shard-edge", cfg["shard_edge"]]
@@ -1661,8 +1691,11 @@ def cmd_multi_bench(args):
                 burr_slots(METHODS[method_name], n, args.burr_eps)
 
     if not args.dry_run:
-        if any(METHODS[m]["tool"] == "sux" for m in methods):
+        if any(METHODS[m]["tool"] == "sux" and not METHODS[m].get("novec")
+               for m in methods):
             ensure_multi_built()
+        if any(METHODS[m].get("novec") for m in methods):
+            ensure_multi_built(novec=True)
         if any(METHODS[m]["tool"] == "burr" and "multi_binary" not in METHODS[m]
                for m in methods):
             ensure_burr_parbench_built(args.burr_dir, bits_list)
@@ -1974,6 +2007,9 @@ def _figure_series(fig_cfg, bits, args):
         cfg = METHODS.get(method_name)
         if cfg is None:
             continue
+        # Methods drawn only at some widths
+        if bits not in fig_cfg.get("method_bits", {}).get(method_name, [bits]):
+            continue
         rdir = Path(args.results_dir) / method_name
         if not rdir.exists():
             continue
@@ -1994,16 +2030,10 @@ def _figure_series(fig_cfg, bits, args):
                                name if pos is None else f"{name}, {b} bits",
                                linestyle, points))
     # Methods drawn again from the results of a vectorized campaign
-    # ("vec_methods", from --vec-results-dir) or of a campaign with the loop
-    # vectorizer disabled ("novec_methods", from --novec-results-dir), with
-    # the same style but dashed
-    # ("novec_bits" restricts the latter to some bit widths)
-    for key, dir_arg in (("vec_methods", "vec_results_dir"),
-                         ("novec_methods", "novec_results_dir")):
-        if key == "novec_methods" and bits not in fig_cfg.get("novec_bits", [bits]):
-            continue
-        result += _figure_other_series(fig_cfg, fig_cfg.get(key, {}),
-                                       getattr(args, dir_arg, None), bits, args)
+    # ("vec_methods", from --vec-results-dir), with the same style but dashed
+    result += _figure_other_series(fig_cfg, fig_cfg.get("vec_methods", {}),
+                                   getattr(args, "vec_results_dir", None),
+                                   bits, args)
     return result
 
 
@@ -2820,10 +2850,6 @@ def make_parser():
                    help="Path to the results directory of a campaign with "
                         "auto-vectorization enabled, used by plot for the "
                         "methods listed in the \"vec_methods\" of a figure")
-    p.add_argument("--novec-results-dir", default=None,
-                   help="Path to the results directory of a campaign with the "
-                        "loop vectorizer disabled, used by plot for the "
-                        "methods listed in the \"novec_methods\" of a figure")
     p.add_argument("--pin", default=os.environ.get("BENCH_PIN"),
                    help="CPU-pinning prefix, e.g. 'taskset -c 2' (ignored by "
                         "multi-bench)")
