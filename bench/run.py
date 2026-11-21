@@ -1703,7 +1703,9 @@ def cmd_multi_bench(args):
             cfg = METHODS[m]
             if cfg["tool"] == "burr" and "multi_binary" in cfg:
                 ensure_burr_parbench_built(
-                    args.burr_dir, sorted({burr_bits(cfg, n, 0) for n, _ in configs}),
+                    args.burr_dir,
+                    sorted({burr_bits(cfg, n, 0) for n, _ in configs
+                            if n.bit_length() - 1 <= cfg.get("max_log2", 64)}),
                     cfg["multi_binary"])
 
     # Functions are bits-agnostic: they run once, with bits 0
@@ -1713,6 +1715,10 @@ def cmd_multi_bench(args):
                                              configs):
         for method_name in methods:
             cfg = METHODS[method_name]
+            # Sizes beyond the method's own limit (e.g., BuRRFunc, which runs
+            # out of memory at 2^33 keys) are skipped
+            if n.bit_length() - 1 > cfg.get("max_log2", 64):
+                continue
             bits_m = bits
             if multi_bits_agnostic(cfg):
                 if (method_name, t, n) in func_done:
@@ -2898,9 +2904,11 @@ def make_parser():
                                     "pinned, and thread counts are set by "
                                     "--build-threads and --query-threads.")
     mb.add_argument("--method",
-                    default="FuseAug3Shards,BuRR,VFunc,PHunc,PHuncBits,BuRRFunc",
+                    default="FuseAug3Shards,FuseAug3Shards-novec,BuRR,VFunc,VFunc-novec,"
+                            "PHunc,PHuncBits,BuRRFunc",
                     help="Method name(s), comma-separated, or 'all' "
-                         "(default: FuseAug3Shards,BuRR,VFunc,PHunc,PHuncBits,BuRRFunc)")
+                         "(default: FuseAug3Shards,FuseAug3Shards-novec,BuRR,VFunc,"
+                         "VFunc-novec,PHunc,PHuncBits,BuRRFunc)")
     mb.add_argument("--bits", default="all",
                     help="Bit widths: 'all' (default), 'even', 'odd', or "
                          "comma-separated ints")
