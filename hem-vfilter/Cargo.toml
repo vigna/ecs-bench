@@ -1,0 +1,22 @@
+# HEM-sharded VFilter: the sharding ablation for the ε-cost sharding paper.
+# Lives in ecs-bench rather than in sux because it is a baseline we do not
+# want to ship: HEM is precisely the scheme the paper replaces.
+[package]
+name = "hem-vfilter"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[dependencies]
+sux = { path = "../sux-rs", features = ["rayon"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+rayon = "1"
+
+[profile.bench]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+debug = true

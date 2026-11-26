@@ -1,0 +1,36 @@
+diff --git a/include/LeMonHashVL.hpp b/include/LeMonHashVL.hpp
+index 1d3091f..cab4223 100644
+--- a/include/LeMonHashVL.hpp
++++ b/include/LeMonHashVL.hpp
+@@ -3,6 +3,7 @@
+ #include <vector>
+ #include <cstdint>
+ #include <string>
++#include <string_view>
+ #include <unordered_set>
+ #include <algorithm>
+ #include <fstream>
+@@ -278,11 +279,11 @@ class LeMonHashVL {
+             return minLCP;
+         }
+ 
+-        uint64_t extractChunk(const std::string &s, const TreeNode &treeNode) {
++        uint64_t extractChunk(std::string_view s, const TreeNode &treeNode) {
+             if constexpr (ALPHABET_MAPPING) {
+-                return alphabetMaps.readChunk(treeNode.alphabetMapIndex, s.c_str() + treeNode.minLCP, s.length() - treeNode.minLCP);
++                return alphabetMaps.readChunk(treeNode.alphabetMapIndex, s.data() + treeNode.minLCP, s.length() - treeNode.minLCP);
+             } else {
+-                const char *str = s.c_str() + treeNode.minLCP;
++                const char *str = s.data() + treeNode.minLCP;
+                 size_t length = s.size() - treeNode.minLCP;
+                 if (length >= 8)
+                     return __builtin_bswap64(*((uint64_t*) str));
+@@ -419,7 +420,7 @@ class LeMonHashVL {
+             }
+         }
+ 
+-        uint64_t operator ()(const std::string &string) {
++        uint64_t operator ()(std::string_view string) {
+             TreePath path;
+             TreeNode *node = &treeNodes.at(treeNodes.size() == 1 ? 0 : treeNodesMphf(path.currentNodeHash()));
+             size_t layer = 0;

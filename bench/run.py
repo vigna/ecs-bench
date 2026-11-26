@@ -1,0 +1,3030 @@
+#!/usr/bin/env python3
+"""
+Benchmark runner for the ε-cost sharding paper.
+
+Orchestrates build, query, and reporting for sux-rs (VFilter, VFunc,
+CompVFunc, LcpMmphf, Lcp2Mmphf), the HEM-sharded VFilter of hem-vfilter/,
+PHastR + array (PHunc), BuRR (bumped ribbon), CSF (compressed static
+functions via BuRR-VL), LeMonHash (MMPHF-Experiments/), and Sux4J GOV3 (Java
+build, C query) benchmarks, plus the BuRR-style parallel query benchmark
+(multi-vfilter/ and BuRR's parbench).  Results are stored as individual files
+under results/<method>/, one per (n, bits) data point, enabling
+interrupt/resume without losing partial progress.
+
+Usage examples:
+
+    # Smoke test: one method, 8 bits, small sizes
+    python3 bench/run.py bench --method FuseAug3Shards --bits 8 --max-log2 22
+
+    # Full run with CPU pinning
+    python3 bench/run.py bench --method all --bits all \\
+        --pin "taskset -c 2"
+
+    # Report to stdout
+    python3 bench/run.py report --method FuseAug3Shards --bits 8
+
+    # BuRR-style parallel query benchmark (2^33 / n structures of n keys
+    # queried at random by all hardware threads)
+    python3 bench/run.py multi-bench --method FuseAug3Shards,BuRR --bits 8
+
+    # Generate paper figures
+    python3 bench/run.py plot --figure filter-build --bits even
+
+    # Show what has been completed
+    python3 bench/run.py status
+
+Environment variables:
+    BENCH_PIN     Default CPU-pinning prefix, e.g. "taskset -c 2"
+    SUX_DIR       Path to sux-rs repo   (default: sux-rs/ submodule)
+    BURR_DIR      Path to BuRR repo     (default: BuRR/ submodule)
+    RESULTS_DIR   Path to results dir   (default: ./results)
+"""
+
+import argparse
+import itertools
+import json
+import math
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Make sibling modules importable when invoked as "python3 bench/run.py".
+# ---------------------------------------------------------------------------
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from configs import (  # noqa: E402
+    ALL_BITS,
+    BITS_AGNOSTIC_TOOLS,
+    DEFAULT_THREADS,
+    EVEN_BITS,
+    FIGURES,
+    METHODS,
+    MIN_LOG2,
+    NOVEC_RUSTFLAGS,
+    ODD_BITS,
+    PARALLEL,
+    STYLE_ORDER,
+    QUERY_KEYS,
+    SUX_FEATURES,
+    SUX_PROFILE,
+)
+from parse import (compute_overhead, distribution_entropy, parse_bits_per_key,
+                    parse_build, parse_query)
+
+# Repo root: bench/ is one level below the repository root, which
+# contains the sux-rs/ and BuRR/ submodules.
+REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+
+
+# =====================================================================
+#  Helpers
+# =====================================================================
+
+
+def sux_target_dir(sux_dir, novec=False):
+    """Return the cargo target directory for the sux-rs crate.
+
+    Respects CARGO_TARGET_DIR if set (resolved relative to sux_dir,
+    matching cargo's behavior when invoked from that directory).
+    Falls back to <sux_dir>/target. The binaries built with the loop
+    vectorizer disabled (novec) go to the same directory with the suffix
+    -novec.
+    """
+    v = os.environ.get("CARGO_TARGET_DIR")
+    if v:
+        p = Path(v)
+        if not p.is_absolute():
+            p = Path(sux_dir) / p
+    else:
+        p = Path(sux_dir) / "target"
+    return p.with_name(p.name + "-novec") if novec else p
+
+
+def cargo_build(crate, args, novec=False):
+    """Run cargo build in a crate with the given arguments; with novec, the
+    loop vectorizer is disabled (see NOVEC_RUSTFLAGS) and the binaries go
+    to the -novec target directory, whose compiler flags are then
+    checked."""
+    cmd = ["cargo", "build"] + args
+    env = None
+    if novec:
+        target = sux_target_dir(crate, novec=True)
+        cmd += ["--target-dir", str(target)]
+        env = dict(os.environ, RUSTFLAGS=NOVEC_RUSTFLAGS)
+    r = subprocess.run(cmd, cwd=str(crate), capture_output=True, text=True,
+                       env=env)
+    if r.returncode == 0 and novec:
+        check_novec_flags(target)
+    return r
+
+
+def check_novec_flags(target):
+    """Exit if a binary in a -novec target directory was not built with
+    NOVEC_RUSTFLAGS (as recorded by cargo in its fingerprints)."""
+    expected = NOVEC_RUSTFLAGS.split()
+    for f in (target / "release" / ".fingerprint").glob("*/bin-*.json"):
+        flags = json.loads(f.read_text()).get("rustflags")
+        if flags != expected:
+            sys.exit(f"{f} was built with flags {flags}, not {expected}")
+
+
+_PARSE_TOOL_MAP = {"csf": "burr", "comp-vfunc": "sux",
+                   "mmphf": "sux", "lemonhash": "sux", "java": "sux",
+                   "hem": "sux",
+                   "mmphf-str": "sux", "lemonhash-str": "sux"}
+
+
+def _parse_tool(tool):
+    """Map a method's tool type to the parser tool name."""
+    return _PARSE_TOOL_MAP.get(tool, tool)
+
+
+def effective_max_log2(args, cfg, bits=None):
+    """Cap on log2(n) for a method and bit width: the config's max_log2,
+    optionally tightened by the entry for the bit width in the config's
+    max_log2_by_bits and by --max-log2 if the user passed it. No implicit
+    fallback.
+
+    Methods that enumerate an explicit ``sizes`` list (e.g. the Sux4J/Java
+    methods) instead of a ``max_log2`` derive their cap from the largest
+    listed size; their size-iterating code paths use ``sizes`` directly, so
+    this value only matters where a range is needed."""
+    if "max_log2" in cfg:
+        cap = cfg["max_log2"]
+    else:
+        cap = max(cfg["sizes"]).bit_length() - 1
+    if bits in cfg.get("max_log2_by_bits", {}):
+        cap = min(cap, cfg["max_log2_by_bits"][bits])
+    if args.max_log2 is not None:
+        cap = min(cap, args.max_log2)
+    return cap
+
+
+def build_threads(cfg, key, args, default=None):
+    """Thread count of a method's build, as configured in cfg[key].
+
+    --threads replaces only the PARALLEL marker, so methods with a fixed
+    count (e.g., the -seq variants) keep it; None means no flag is passed.
+    """
+    threads = cfg.get(key, default)
+    if threads == PARALLEL:
+        return args.threads if args.threads is not None else DEFAULT_THREADS
+    return threads
+
+
+def result_complete(path, tool, no_queries=False):
+    """Check whether a result file exists and contains valid timing data.
+
+    A .err file can exist but be incomplete if the benchmark was killed
+    mid-run (e.g. after the build phase wrote its output but before the
+    query phase appended its results).  We require both construction
+    *and* query timing to be present, unless ``no_queries`` is True.
+    """
+    if not path.exists():
+        return False
+    text = path.read_text()
+    bd = parse_build(text, tool)
+    if "constr_ns" not in bd:
+        return False
+    if no_queries:
+        return True
+    qd = parse_query(text, tool)
+    return "query_min" in qd
+
+
+def resolve_methods(arg):
+    """Turn a --method argument into a list of method names.
+
+    Accepts "all", a comma-separated list, or a single name.
+    """
+    if arg == "all":
+        return list(METHODS.keys())
+    names = [s.strip() for s in arg.split(",")]
+    for n in names:
+        if n not in METHODS:
+            sys.exit(f"Unknown method: {n}\nAvailable: {', '.join(METHODS)}")
+    return names
+
+
+def resolve_bits(arg):
+    """Turn a --bits argument into a list of integer bit widths.
+
+    Accepts "all", "even", "odd", or a comma-separated list of ints.
+    """
+    if arg == "all":
+        return ALL_BITS
+    if arg == "even":
+        return EVEN_BITS
+    if arg == "odd":
+        return ODD_BITS
+    return [int(b) for b in arg.split(",")]
+
+
+def result_dir(base, method):
+    """Return (and create) the results directory for a method."""
+    d = Path(base) / method
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def data_dir(base, method):
+    """Return (and create) the directory for ephemeral serialized files."""
+    d = Path(base) / method / "data"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def size_check(outfile, n, text):
+    """Verify on-disk size against self-reported in-memory bits/key.
+
+    Builders log a ``Bits/key:`` (or ``Size: N Bytes = X bits/key``)
+    line; ε-serde / Sux4J / BuRR / CSF then dump the structure to a file
+    of comparable size.  Mismatches over 1% suggest serialization
+    overhead or a counting bug worth flagging.
+
+    Returns a one-line warning string, or None when the check passes
+    (or cannot be performed: file missing, no bits/key in log, n ≤ 0).
+    """
+    if outfile is None or not outfile.exists() or n is None or n <= 0:
+        return None
+    bpk = parse_bits_per_key(text, n)
+    if bpk is None or bpk <= 0:
+        return None
+    file_bytes = outfile.stat().st_size
+    expected = bpk * n / 8.0
+    rel = abs(file_bytes - expected) / expected
+    if rel <= 0.01:
+        return None
+    return (f"WARNING: file size {file_bytes} B differs by {rel*100:.2f}% "
+            f"from self-reported {bpk:.3f} bits/key "
+            f"(expected ~{expected:.0f} B)\n")
+
+
+# =====================================================================
+#  Binary builders
+# =====================================================================
+
+
+def ensure_sux_built(sux_dir, need_comp_vfunc=False, novec=False):
+    """Compile the sux-rs binaries (with novec, with the loop vectorizer
+    disabled, see cargo_build).
+
+    Always runs cargo build (which rebuilds only what is out of date) with
+    the bench profile and the feature set needed for all current
+    benchmarks.
+    """
+    sux = Path(sux_dir)
+    print(f"Building sux-rs binaries{' (novec)' if novec else ''} in {sux}…")
+    cmd = [
+        "--profile", SUX_PROFILE,
+        "--features", SUX_FEATURES,
+        "--bin", "vfilter",
+        "--bin", "vfunc",
+        "--bin", "phunc",
+        "--example", "bench_vfilter",
+        "--example", "bench_vfunc",
+        "--example", "bench_phunc",
+        "--bin", "comp_vfunc",
+        "--example", "bench_comp_vfunc",
+    ]
+    r = cargo_build(sux, cmd, novec)
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        sys.exit(f"cargo build failed (exit {r.returncode})")
+
+
+def ensure_csf_built():
+    """Ensure bench_csf is built via the top-level Makefile."""
+    print("Building bench_csf…")
+    r = subprocess.run(
+        ["make", "bench_csf"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        print("WARNING: bench_csf build failed, skipping CSF methods")
+        return False
+    return True
+
+
+def ensure_burr_built(burr_dir, bits_values, targets=("bench",)):
+    """Compile BuRR binaries for each requested bit width.
+
+    BuRR compiles the bit width into the binary via -DRIBBON_BITS=X,
+    producing e.g. bench8, bench16, bench32.  We use the 'bench'
+    Makefile target (-O3 -DNDEBUG), not 'ribbon' (-O2, assertions on),
+    and the 'benchpos' target, which differs only in that it queries keys
+    of the filter.
+    """
+    burr = Path(burr_dir)
+    if not burr.exists():
+        print(f"WARNING: BuRR directory {burr} not found, skipping BuRR methods")
+        return False
+
+    # GCC 15+ miscompiles LeMonHash/SimpleRibbon at -O3 without -fno-strict-aliasing
+    #
+    # The BuRR Makefile's bench target uses wildcard header deps that
+    # cause unconditional rebuilds.  We check source timestamps ourselves
+    # and skip if the binary is newer than all sources.
+    src_mtime = max(
+        (f.stat().st_mtime for f in burr.iterdir()
+         if f.suffix in (".cpp", ".hpp") or f.name == "Makefile"),
+        default=0.0,
+    )
+    for target, bits in itertools.product(targets, bits_values):
+        binary = burr / f"{target}{bits}"
+        if binary.exists() and binary.stat().st_mtime >= src_mtime:
+            continue
+        print(f"Building BuRR {target}{bits} in {burr}…")
+        r = subprocess.run(
+            ["make", f"RIBBON_BITS={bits}",
+             "OPTFLAGS=-O3 -DNDEBUG -march=native -fPIE -fno-strict-aliasing", target],
+            cwd=str(burr), capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            print(r.stderr, file=sys.stderr)
+            sys.exit(f"BuRR make {target} failed for RIBBON_BITS={bits}")
+    return True
+
+
+def burr_targets(methods):
+    """The BuRR Makefile targets needed by a list of methods, except for
+    those of methods with index values (see index_bits)."""
+    return sorted({METHODS[m]["burr_binary"] for m in methods
+                   if METHODS[m]["tool"] == "burr"
+                   and not METHODS[m].get("index_values")})
+
+
+def index_bits(n):
+    """The width of the values of a function mapping each of the n keys
+    [0 . . n) to itself (⌈lg n⌉ bits, at least one), which is the width
+    compiled into the BuRR binaries of methods with "index_values"."""
+    return max(1, (n - 1).bit_length())
+
+
+def burr_bits(cfg, n, bits):
+    """The width compiled into the BuRR binary of a method for n keys."""
+    return index_bits(n) if cfg.get("index_values") else bits
+
+
+def ensure_lemonhash_built():
+    """Ensure bench_lemonhash is built via the top-level Makefile."""
+    print("Building bench_lemonhash…")
+    r = subprocess.run(
+        ["make", "bench_lemonhash"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        print("WARNING: bench_lemonhash build failed, skipping LeMonHash")
+        return False
+    return True
+
+
+def ensure_lemonhash_str_built():
+    """Ensure bench_lemonhash_str is built via the top-level Makefile."""
+    print("Building bench_lemonhash_str…")
+    r = subprocess.run(
+        ["make", "bench_lemonhash_str"],
+        cwd=REPO_ROOT, capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        print("WARNING: bench_lemonhash_str build failed, skipping LeMonHashStr")
+        return False
+    return True
+
+
+# --- String dataset helpers ---
+
+# Directory containing sorted string datasets (one string per line).
+DATA_DIR = os.path.join(REPO_ROOT, "data")
+
+
+def list_datasets():
+    """Return sorted list of dataset filenames in the data/ directory.
+
+    Returns an empty list if the directory does not exist.
+    """
+    if not os.path.isdir(DATA_DIR):
+        return []
+    return sorted(
+        f for f in os.listdir(DATA_DIR)
+        if os.path.isfile(os.path.join(DATA_DIR, f))
+        and not f.startswith(".")
+    )
+
+
+def ensure_mmphf_built(sux_dir, novec=False):
+    """Ensure lcp_mmphf and bench_lcp_mmphf are built in sux-rs (with novec,
+    with the loop vectorizer disabled, see cargo_build)."""
+    sux = Path(sux_dir)
+    print(f"Building lcp_mmphf + bench_lcp_mmphf{' (novec)' if novec else ''} "
+          f"in {sux}…")
+    cmd = [
+        "--profile", SUX_PROFILE,
+        "--features", SUX_FEATURES,
+        "--bin", "lcp_mmphf",
+        "--example", "bench_lcp_mmphf",
+    ]
+    r = cargo_build(sux, cmd, novec)
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        sys.exit(f"cargo build failed for lcp_mmphf (exit {r.returncode})")
+
+
+def ensure_java_built():
+    """Compile the Java benchmark builder."""
+    java_dir = Path(REPO_ROOT) / "java"
+    print("Building Java benchmark builder…")
+    mvnw = java_dir / "mvnw"
+    r = subprocess.run(
+        [str(mvnw), "-q", "package", "-DskipTests"],
+        cwd=str(java_dir), capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        print("WARNING: Java build failed, skipping GOV3 methods")
+        return False
+    return True
+
+
+_SUX4J_C_VARIANTS = {}
+for _b in EVEN_BITS:
+    _SUX4J_C_VARIANTS[(_b, False)] = (f"test_sf3_filter{_b}", [f"-DSF_{_b}", "-DFILTER"])
+for _b in ODD_BITS:
+    _SUX4J_C_VARIANTS[(_b, False)] = (f"test_sf3_filter{_b}", ["-DFILTER"])
+_SUX4J_C_VARIANTS[("csf", True)] = ("test_csf3_uint64", [])
+
+
+def hem_target_dir(novec=False):
+    """Return the cargo target directory of the hem-vfilter crate (with
+    novec, that of the build with the loop vectorizer disabled)."""
+    return Path(REPO_ROOT) / "hem-vfilter" / ("target-novec" if novec else "target")
+
+
+def ensure_hem_built(novec=False):
+    """Compile the HEM-sharded VFilter used as the sharding ablation (with
+    novec, with the loop vectorizer disabled, see cargo_build)."""
+    hem = Path(REPO_ROOT) / "hem-vfilter"
+    if not hem.exists():
+        print("WARNING: hem-vfilter/ not found, skipping HEM methods")
+        return False
+    print(f"Building hem-vfilter binaries{' (novec)' if novec else ''} "
+          f"in {hem}\u2026")
+    args = ["--profile", SUX_PROFILE]
+    if novec:
+        args += ["--target-dir", str(hem_target_dir(novec=True))]
+        env = dict(os.environ, RUSTFLAGS=NOVEC_RUSTFLAGS)
+        r = subprocess.run(["cargo", "build"] + args, cwd=str(hem),
+                           capture_output=True, text=True, env=env)
+        if r.returncode == 0:
+            check_novec_flags(hem_target_dir(novec=True))
+    else:
+        r = subprocess.run(["cargo", "build"] + args, cwd=str(hem),
+                           capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        print("WARNING: hem-vfilter build failed, skipping HEM methods")
+        return False
+    return True
+
+
+def ensure_sux4j_c_built(bits_values):
+    """Compile the Sux4J C test harnesses for the requested bit widths."""
+    sux4j_c = Path(REPO_ROOT) / "Sux4J" / "c"
+    if not sux4j_c.exists():
+        print("WARNING: Sux4J/c/ not found, skipping GOV3 methods")
+        return False
+
+    cc = os.environ.get("CC", "cc")
+    cflags = ["-O3", "-march=native"]
+
+    for bits in bits_values:
+        key = (bits, False)
+        if key not in _SUX4J_C_VARIANTS:
+            continue
+        binary_name, extra_flags = _SUX4J_C_VARIANTS[key]
+        binary_path = sux4j_c / binary_name
+        print(f"  Building {binary_name}…")
+        cmd = [cc] + cflags + extra_flags + [
+            "-o", str(binary_path),
+            str(sux4j_c / "test_sf3_uint64_t.c"),
+            str(sux4j_c / "sf3.c"),
+            str(sux4j_c / "sf.c"),
+            str(sux4j_c / "spooky.c"),
+        ]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stderr, file=sys.stderr)
+            print(f"WARNING: failed to compile {binary_name}")
+            return False
+
+    key = ("csf", True)
+    binary_name, extra_flags = _SUX4J_C_VARIANTS[key]
+    binary_path = sux4j_c / binary_name
+    print(f"  Building {binary_name}…")
+    cmd = [cc] + cflags + extra_flags + [
+        "-o", str(binary_path),
+        str(sux4j_c / "test_csf3_uint64_t.c"),
+        str(sux4j_c / "csf3.c"),
+        str(sux4j_c / "csf.c"),
+        str(sux4j_c / "spooky.c"),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        print(f"WARNING: failed to compile {binary_name}")
+        return False
+
+    return True
+
+
+# =====================================================================
+#  Command constructors
+# =====================================================================
+
+
+def sux_build_cmd(cfg, n, bits, outfile, args):
+    """Assemble the vfilter build command line.
+
+    Example (odd bits):
+        vfilter -n 1048576 --shard-edge fuse-aug3-shards --bits 9
+                --unaligned --threads 32 output.bin
+
+    --unaligned is only valid for non-power-of-2 bit widths (9, 17, 33).
+    For power-of-2 widths (8, 16, 32) the backend is a boxed slice of
+    the matching primitive, which is inherently aligned.
+    """
+    target = sux_target_dir(args.sux_dir, cfg.get("novec", False))
+    cmd = [str(target / "release" / cfg["build_bin"])]
+    cmd += ["-n", str(n)]
+    if "shard_edge" in cfg:
+        cmd += ["--shard-edge", cfg["shard_edge"]]
+    if bits > 0:
+        cmd += ["--bits", str(bits)]
+        if args.unaligned and bits not in EVEN_BITS:
+            cmd += ["--unaligned"]
+    # Methods that always use unaligned reads (PHunc)
+    if cfg.get("unaligned", False) and "--unaligned" not in cmd:
+        cmd += ["--unaligned"]
+
+    # Per-method extras: --eps, --seed, etc.
+    cmd += cfg.get("build_extra", [])
+
+    # Thread count (omit if None = default / single-threaded)
+    threads = build_threads(cfg, "build_threads", args)
+    if threads is not None:
+        cmd += ["--threads", str(threads)]
+
+    # Dynamic flag: --low-mem for very large instances
+    log2_n = n.bit_length() - 1
+    threshold = cfg.get("low_mem_threshold")
+    if threshold is not None and log2_n >= threshold:
+        cmd += ["--low-mem"]
+
+    # Positional: output file (ε-serde serialized structure)
+    cmd += [str(outfile)]
+    return cmd
+
+
+def sux_query_cmd(cfg, n, bits, infile, args):
+    """Assemble the bench_vfilter query command line.
+
+    Example (odd bits):
+        bench_vfilter 100000000 output.bin --shard-edge fuse-aug3-shards
+                      --bits 9 --unaligned
+    """
+    target = sux_target_dir(args.sux_dir, cfg.get("novec", False))
+    cmd = [str(target / "release" / "examples" / cfg["bench_bin"])]
+    cmd += [str(cfg.get("query_keys", QUERY_KEYS))]
+    cmd += [str(infile)]                 # serialized structure
+    if "shard_edge" in cfg:
+        cmd += ["--shard-edge", cfg["shard_edge"]]
+    if bits > 0:
+        cmd += ["--bits", str(bits)]
+    if bits > 0 and args.unaligned and bits not in EVEN_BITS:
+        cmd += ["--unaligned"]
+    if cfg.get("unaligned", False) and "--unaligned" not in cmd:
+        cmd += ["--unaligned"]
+    return cmd
+
+
+def burr_bench_cmd(cfg, n, bits, args, serialize_to=None):
+    """Assemble the BuRR ribbon build command line.
+
+    Pass serialize_to to write the structure for later queries.
+    Caller should append -Q to suppress queries during the build step.
+
+    Example output:
+        bench8 -t 32 -L 64 -2 -I -n 1048576 -w output.bin
+    """
+    burr = Path(args.burr_dir)
+    binary = f"{cfg['burr_binary']}{burr_bits(cfg, n, bits)}"
+    cmd = [str(burr / binary)]
+
+    threads = build_threads(cfg, "burr_threads", args, default=1)
+    cmd += ["-t", str(threads)]
+
+    cmd += cfg["burr_flags"]
+    cmd += ["-n", str(n)]
+
+    if serialize_to is not None:
+        cmd += ["-w", str(serialize_to)]
+
+    return cmd
+
+
+def burr_query_cmd(cfg, n, bits, infile, args):
+    """Assemble the BuRR query-only command line.
+
+    Uses -r to deserialize a previously built structure, then runs
+    the built-in query benchmark (100M keys, 5 repeats).
+
+    Example output:
+        bench8 -t 1 -L 64 -2 -I -n 1048576 -r input.bin
+    """
+    burr = Path(args.burr_dir)
+    binary = f"{cfg['burr_binary']}{burr_bits(cfg, n, bits)}"
+    cmd = [str(burr / binary)]
+    cmd += ["-t", "1"]
+    cmd += cfg["burr_flags"]
+    cmd += ["-n", str(n)]
+    cmd += ["-r", str(infile)]
+    return cmd
+
+
+def comp_vfunc_build_cmd(cfg, n, outfile, args):
+    """Assemble the comp_vfunc build command line.
+
+    Example:
+        comp_vfunc -n 1048576 --geometric --shard-edge fuse3-shards
+                   --threads 32 output.bin
+    """
+    target = sux_target_dir(args.sux_dir)
+    cmd = [str(target / "release" / "comp_vfunc")]
+    cmd += ["-n", str(n)]
+    cmd += cfg["distribution"]
+    cmd += ["--shard-edge", cfg["shard_edge"]]
+    cmd += ["--huffman-entropy-threshold", "1"]
+
+    threads = build_threads(cfg, "build_threads", args)
+    if threads is not None:
+        cmd += ["--threads", str(threads)]
+
+    cmd += [str(outfile)]
+    return cmd
+
+
+def comp_vfunc_query_cmd(cfg, n, infile, args):
+    """Assemble the bench_comp_vfunc query command line.
+
+    Example:
+        bench_comp_vfunc 100000000 output.bin --shard-edge fuse3-shards
+    """
+    target = sux_target_dir(args.sux_dir)
+    cmd = [str(target / "release" / "examples" / "bench_comp_vfunc")]
+    cmd += [str(cfg.get("query_keys", QUERY_KEYS))]
+    cmd += [str(infile)]
+    cmd += ["--shard-edge", cfg["shard_edge"]]
+    return cmd
+
+
+def csf_build_cmd(cfg, n, outfile):
+    """Assemble the bench_csf build command (no queries, serialize).
+
+    Example:
+        bench_csf -n 1048576 --geometric --coder huffman -Q -w output.bin
+    """
+    cmd = [str(Path(REPO_ROOT) / "bench_csf")]
+    cmd += ["-n", str(n)]
+    cmd += cfg["distribution"]
+    cmd += ["--coder", cfg["coder"]]
+    cmd += ["-Q", "-w", str(outfile)]
+    return cmd
+
+
+def csf_query_cmd(cfg, n, infile):
+    """Assemble the bench_csf query command (deserialize, run queries).
+
+    Example:
+        bench_csf -n 1048576 --coder huffman --queries 20000000 -r input.bin
+    """
+    cmd = [str(Path(REPO_ROOT) / "bench_csf")]
+    cmd += ["-n", str(n)]
+    cmd += ["--coder", cfg["coder"]]
+    cmd += ["--queries", str(cfg.get("query_keys", QUERY_KEYS))]
+    cmd += ["-r", str(infile)]
+    return cmd
+
+
+def hem_build_cmd(cfg, n, bits, outfile, args):
+    """Assemble the hem_vfilter build command line.
+
+    The number of shards is left to the binary, which by default picks the
+    one VFilter would pick for the same key set: the comparison is then a
+    pure layout ablation.
+
+    Example:
+        hem_vfilter -n 1048576 --bits 9 output.bin
+    """
+    cmd = [str(hem_target_dir(cfg.get("novec", False)) / "release" / "hem_vfilter")]
+    cmd += ["-n", str(n)]
+    if bits > 0:
+        cmd += ["--bits", str(bits)]
+        # Mirror sux_build_cmd exactly: the two structures must use the same
+        # value backend, or the comparison measures the backend instead of
+        # the sharding.
+        if args.unaligned and bits not in EVEN_BITS:
+            cmd += ["--unaligned"]
+    cmd += cfg.get("build_extra", [])
+    cmd += [str(outfile)]
+    return cmd
+
+
+def hem_query_cmd(cfg, n, bits, infile, args):
+    """Assemble the bench_hem_vfilter query command line."""
+    cmd = [str(hem_target_dir(cfg.get("novec", False)) / "release" /
+               "bench_hem_vfilter")]
+    cmd += [str(cfg.get("query_keys", QUERY_KEYS))]
+    cmd += [str(infile)]
+    return cmd
+
+
+def java_build_cmd(cfg, n, bits, outfile):
+    """Assemble the Java BenchBuilder command line."""
+    java_dir = Path(REPO_ROOT) / "java"
+    jar = java_dir / "target" / "ecs-bench-java-1.0-SNAPSHOT.jar"
+    classpath = f"{jar}:{java_dir / 'target' / 'lib' / '*'}"
+    mem = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    xmx = int(mem * 0.9) // (1 << 20)
+    cmd = ["java", f"-Xmx{xmx}m", "-cp", classpath, "it.unimi.dsi.ecs.BenchBuilder"]
+
+    if cfg["java_type"] == "GOV3Function":
+        cmd += ["GOV3Function", str(n), str(bits), str(outfile)]
+    elif cfg["java_type"] == "GV3CompressedFunction":
+        cmd += ["GV3CompressedFunction", str(n)]
+        cmd += cfg["distribution"]
+        cmd += [str(outfile)]
+    return cmd
+
+
+def java_query_cmd(cfg, bits, dumpfile):
+    """Assemble the Sux4J C query harness command line."""
+    sux4j_c = Path(REPO_ROOT) / "Sux4J" / "c"
+    if cfg["java_type"] == "GV3CompressedFunction":
+        binary = "test_csf3_uint64"
+    else:
+        binary = f"test_sf3_filter{bits}"
+    return [str(sux4j_c / binary), str(dumpfile)]
+
+
+def run_cmd(cmd, pin=None, dry_run=False):
+    """Run a benchmark command, optionally prefixed by a pinning command.
+
+    Args:
+        cmd:     list of command-line tokens.
+        pin:     optional CPU-pinning prefix, e.g. "taskset -c 2".
+                 Parsed with shlex.split and prepended to cmd.
+        dry_run: if True, print the command but don't execute.
+
+    Returns:
+        subprocess.CompletedProcess, or None if dry_run.
+    """
+    if pin:
+        cmd = shlex.split(pin) + cmd
+
+    if dry_run:
+        print(f"  [dry-run] {shlex.join(cmd)}")
+        return None
+
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"  FAILED (exit {r.returncode}): {shlex.join(cmd)}", file=sys.stderr)
+        for stream in (r.stderr, r.stdout):
+            if stream:
+                for line in stream.strip().splitlines():
+                    print(f"    {line}", file=sys.stderr)
+    return r
+
+
+# =====================================================================
+#  Subcommand: bench
+# =====================================================================
+
+
+def cmd_bench(args):
+    """Build structures, query them, and delete the serialized file.
+
+    For each (n, method, bits) triple, ordered by size first:
+      1. Skip if bench.<n>.<bits>.err already exists (resume support).
+      2. Build the structure (unpinned), serialize to disk.
+      3. Run the query benchmark (pinned).
+      4. Delete the serialized file (unless --keep-data).
+    """
+    methods = resolve_methods(args.method)
+    bits_list = resolve_bits(args.bits)
+
+    # Ensure binaries are compiled.
+    sux_needed = any(METHODS[m]["tool"] == "sux" for m in methods)
+    comp_vfunc_needed = any(METHODS[m]["tool"] == "comp-vfunc" for m in methods)
+    burr_needed = any(METHODS[m]["tool"] == "burr" for m in methods)
+    csf_needed = any(METHODS[m]["tool"] == "csf" for m in methods)
+    mmphf_needed = any(METHODS[m]["tool"] == "mmphf" for m in methods)
+    mmphf_str_needed = any(METHODS[m]["tool"] == "mmphf-str" for m in methods)
+    lemonhash_needed = any(METHODS[m]["tool"] == "lemonhash" for m in methods)
+    lemonhash_str_needed = any(METHODS[m]["tool"] == "lemonhash-str" for m in methods)
+    java_needed = any(METHODS[m]["tool"] == "java" for m in methods)
+    burr_ok = True
+    csf_ok = True
+    lemonhash_ok = True
+    lemonhash_str_ok = True
+    java_ok = True
+
+    # A dry run only prints commands, so, as in multi-bench, it builds nothing
+    # and assumes that all binaries are available.
+    if not args.dry_run:
+        if sux_needed or comp_vfunc_needed:
+            ensure_sux_built(args.sux_dir, need_comp_vfunc=comp_vfunc_needed)
+        if any(METHODS[m].get("novec") for m in methods):
+            ensure_sux_built(args.sux_dir, novec=True)
+        if mmphf_needed or mmphf_str_needed:
+            ensure_mmphf_built(args.sux_dir)
+        if any(METHODS[m].get("novec") and METHODS[m]["tool"] == "mmphf"
+               for m in methods):
+            ensure_mmphf_built(args.sux_dir, novec=True)
+        if burr_needed:
+            burr_ok = ensure_burr_built(args.burr_dir, bits_list,
+                                        burr_targets(methods))
+            # Methods with index values need a binary for each width
+            for m in methods:
+                cfg = METHODS[m]
+                if burr_ok and cfg["tool"] == "burr" and cfg.get("index_values"):
+                    widths = [index_bits(1 << l) for l in
+                              range(MIN_LOG2, effective_max_log2(args, cfg) + 1)]
+                    burr_ok = ensure_burr_built(args.burr_dir, widths,
+                                                (cfg["burr_binary"],))
+        if csf_needed:
+            csf_ok = ensure_csf_built()
+        if lemonhash_needed:
+            lemonhash_ok = ensure_lemonhash_built()
+        if lemonhash_str_needed:
+            lemonhash_str_ok = ensure_lemonhash_str_built()
+        for novec in (False, True):
+            hem = [m for m in methods if METHODS[m]["tool"] == "hem"
+                   and METHODS[m].get("novec", False) == novec]
+            if hem and not ensure_hem_built(novec):
+                methods = [m for m in methods if m not in hem]
+        if java_needed:
+            java_ok = ensure_java_built()
+            if java_ok:
+                java_types = {METHODS[m].get("java_type") for m in methods
+                              if METHODS[m]["tool"] == "java"}
+                filter_bits = bits_list if "GOV3Function" in java_types else []
+                java_ok = ensure_sux4j_c_built(filter_bits)
+
+    # --- String-dataset methods (iterate over files in data/) ---
+    datasets = list_datasets()
+    str_methods = [m for m in methods
+                   if METHODS[m]["tool"] in ("mmphf-str", "lemonhash-str")]
+    if str_methods and not datasets:
+        print("Skipping string methods (no datasets in data/)")
+        str_methods = []
+
+    for method_name in str_methods:
+        cfg = METHODS[method_name]
+        if cfg["tool"] == "lemonhash-str" and not lemonhash_str_ok:
+            print(f"Skipping {method_name} (bench_lemonhash_str not available)")
+            continue
+        rdir = result_dir(args.results_dir, method_name)
+        tool_for_parse = _parse_tool(cfg["tool"])
+        for dataset in datasets:
+            bench_err = rdir / f"bench.{dataset}.0.err"
+            if not args.force and result_complete(bench_err, tool_for_parse):
+                continue
+            if cfg["tool"] == "mmphf-str":
+                _bench_mmphf_str(cfg, method_name, dataset, rdir, args)
+            elif cfg["tool"] == "lemonhash-str":
+                _bench_lemonhash_str(cfg, method_name, dataset, rdir, args)
+
+    # --- Size-based methods (the standard log2 iteration) ---
+    # Build the work list: (log2_n, method_name, bits) triples,
+    # ordered by size first so that if a method OOMs we still have
+    # complete data at every smaller size.
+    work = []
+    for method_name in methods:
+        cfg = METHODS[method_name]
+
+        if cfg["tool"] in ("mmphf-str", "lemonhash-str"):
+            continue
+        if cfg["tool"] == "burr" and not burr_ok:
+            print(f"Skipping {method_name} (BuRR not available)")
+            continue
+        if cfg["tool"] == "csf" and not csf_ok:
+            print(f"Skipping {method_name} (bench_csf not available)")
+            continue
+        if cfg["tool"] == "lemonhash" and not lemonhash_ok:
+            print(f"Skipping {method_name} (bench_lemonhash not available)")
+            continue
+        if cfg["tool"] == "java" and not java_ok:
+            print(f"Skipping {method_name} (Java/Sux4J not available)")
+            continue
+
+        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in BITS_AGNOSTIC_TOOLS)
+        method_bits = [0] if bits_agnostic else bits_list
+
+        explicit_sizes = cfg.get("sizes")
+        for bits in method_bits:
+            max_log2 = effective_max_log2(args, cfg, bits)
+            if explicit_sizes is not None:
+                for n in explicit_sizes:
+                    # --max-log2 must tighten an explicit size list too, or a
+                    # smoke run at 2^20 would silently also build 2^30.
+                    if n.bit_length() - 1 > max_log2:
+                        continue
+                    work.append((n.bit_length() - 1, method_name, bits))
+            else:
+                for log2_n in range(MIN_LOG2, max_log2 + 1):
+                    work.append((log2_n, method_name, bits))
+
+    work.sort(key=lambda t: t[0])
+
+    for log2_n, method_name, bits in work:
+        cfg = METHODS[method_name]
+        n = 1 << log2_n
+        rdir = result_dir(args.results_dir, method_name)
+
+        bench_err = rdir / f"bench.{n}.{bits}.err"
+        tool_for_parse = _parse_tool(cfg["tool"])
+        if not args.force and result_complete(
+                bench_err, tool_for_parse,
+                no_queries=cfg.get("no_queries", False)):
+            continue
+
+        if cfg["tool"] == "comp-vfunc":
+            _bench_comp_vfunc(cfg, method_name, n, log2_n,
+                             rdir, args)
+        elif cfg["tool"] == "csf":
+            _bench_csf(cfg, method_name, n, log2_n,
+                           rdir, args)
+        elif cfg["tool"] == "burr":
+            _bench_burr(cfg, method_name, n, bits, log2_n,
+                        rdir, args)
+        elif cfg["tool"] == "mmphf":
+            _bench_mmphf(cfg, method_name, n, log2_n,
+                         rdir, args)
+        elif cfg["tool"] == "lemonhash":
+            _bench_lemonhash(cfg, method_name, n, log2_n,
+                             rdir, args)
+        elif cfg["tool"] == "java":
+            _bench_java(cfg, method_name, n, bits, log2_n,
+                        rdir, args)
+        elif cfg["tool"] == "hem":
+            _bench_sux(cfg, method_name, n, bits, log2_n,
+                       rdir, args)
+        else:
+            _bench_sux(cfg, method_name, n, bits, log2_n,
+                       rdir, args)
+
+    print("Done.")
+
+
+def _bench_burr(cfg, method_name, n, bits, log2_n, rdir, args):
+    """Run a single BuRR benchmark: build, serialize, query, delete.
+
+    Separating build from query is essential for reliable query timings:
+    the build can use many threads, but queries must run on a pinned
+    core (taskset -c 2) without interference from the parallel builder.
+
+    Steps:
+      1. Build with -Q (no queries) and -w (serialize).
+      2. Query with -r (deserialize) on a single thread, pinned.
+      3. Delete the serialized file (unless --keep-data).
+    """
+    ddir = data_dir(args.results_dir, method_name)
+    outfile = ddir / f"filter.{n}.{bits}.bin"
+
+    # --- Build (no queries, serialize, unpinned) ---
+    cmd = burr_bench_cmd(cfg, n, bits, args, serialize_to=outfile)
+    cmd += ["-Q"]
+
+    bits_str = f" bits={bits}" if bits > 0 else ""
+    print(f"  bench {method_name} n=2^{log2_n}{bits_str}")
+    result = run_cmd(cmd, dry_run=args.dry_run)
+
+    # --- Query (deserialize, single-threaded, pinned by default) ---
+    qr = None
+    if not cfg.get("no_queries"):
+        qcmd = burr_query_cmd(cfg, n, bits, outfile, args)
+        if args.dry_run or result.returncode == 0:
+            pin = args.pin if cfg.get("pin_query", True) else None
+            qr = run_cmd(qcmd, pin=pin, dry_run=args.dry_run)
+
+    if args.dry_run:
+        return
+
+    if result.returncode != 0:
+        (rdir / f"bench.{n}.{bits}.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
+        return
+
+    build_output = result.stdout
+    err_path = rdir / f"bench.{n}.{bits}.err"
+    err_path.write_text(build_output)
+
+    warn = size_check(outfile, n, build_output)
+    if warn is not None:
+        with open(err_path, "a") as f:
+            f.write(warn)
+
+    if qr is not None and qr.returncode == 0:
+        with open(err_path, "a") as f:
+            f.write("\n--- query ---\n")
+            f.write(qr.stdout)
+
+    # --- Clean up ---
+    if not args.keep_data and outfile.exists():
+        outfile.unlink()
+
+
+def _bench_comp_vfunc(cfg, method_name, n, log2_n, rdir, args):
+    """Run a single CompVFunc benchmark: build, query, delete.
+
+    Two-step like VFilter: build with comp_vfunc, query with
+    bench_comp_vfunc.  Results stored with bits=0.
+    """
+    ddir = data_dir(args.results_dir, method_name)
+    outfile = ddir / f"func.{n}.bin"
+
+    # --- Build (unpinned) ---
+    cmd = comp_vfunc_build_cmd(cfg, n, outfile, args)
+    print(f"  bench {method_name} n=2^{log2_n}")
+    result = run_cmd(cmd, dry_run=args.dry_run)
+
+    # --- Query (pinned, only if build succeeded) ---
+    qr = None
+    if args.dry_run or result.returncode == 0:
+        qcmd = comp_vfunc_query_cmd(cfg, n, outfile, args)
+        qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
+
+    if args.dry_run:
+        return
+
+    build_output = result.stderr
+    if result.returncode != 0:
+        (rdir / f"bench.{n}.0.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
+        return
+
+    err_path = rdir / f"bench.{n}.0.err"
+    err_path.write_text(build_output)
+
+    warn = size_check(outfile, n, build_output)
+    if warn is not None:
+        with open(err_path, "a") as f:
+            f.write(warn)
+
+    if qr is not None and qr.returncode == 0:
+        with open(err_path, "a") as f:
+            f.write("\n--- query ---\n")
+            f.write(qr.stderr)
+
+    # --- Clean up ---
+    if not args.keep_data and outfile.exists():
+        outfile.unlink()
+
+
+def _bench_mmphf(cfg, method_name, n, log2_n, rdir, args):
+    """Run a LcpMmphf/Lcp2Mmphf benchmark: build, then query.
+
+    Build:  lcp_mmphf -n <n> [--unaligned] --threads 1 [-2] <outfile>
+    Query:  bench_lcp_mmphf <query_keys> <outfile> [--unaligned] [-2]
+            --repeats 5
+    """
+    target = sux_target_dir(args.sux_dir, cfg.get("novec", False))
+    ddir = data_dir(args.results_dir, method_name)
+    outfile = ddir / f"func.{n}.bin"
+
+    # --- Build (pinned — single-threaded, so pinning is fine) ---
+    cmd = [str(target / "release" / "lcp_mmphf")]
+    cmd += ["-n", str(n)]
+    if args.unaligned:
+        cmd += ["--unaligned"]
+    cmd += ["--threads", "1"]
+    if cfg.get("variant") == "lcp2":
+        cmd += ["-2"]
+    cmd += [str(outfile)]
+
+    print(f"  bench {method_name} n=2^{log2_n}")
+    result = run_cmd(cmd, pin=args.pin, dry_run=args.dry_run)
+
+    # --- Query (pinned, only if build succeeded) ---
+    qkeys = cfg.get("query_keys", QUERY_KEYS)
+    qcmd = [str(target / "release" / "examples" / "bench_lcp_mmphf")]
+    qcmd += [str(qkeys), str(outfile)]
+    if args.unaligned:
+        qcmd += ["--unaligned"]
+    if cfg.get("variant") == "lcp2":
+        qcmd += ["-2"]
+    qcmd += ["--repeats", "5"]
+    qr = None
+    if args.dry_run or result.returncode == 0:
+        qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
+
+    if args.dry_run:
+        return
+
+    build_output = result.stderr
+    if result.returncode != 0:
+        (rdir / f"bench.{n}.0.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
+        return
+
+    err_path = rdir / f"bench.{n}.0.err"
+    err_path.write_text(build_output)
+
+    warn = size_check(outfile, n, build_output)
+    if warn is not None:
+        with open(err_path, "a") as f:
+            f.write(warn)
+
+    if qr is not None and qr.returncode == 0:
+        with open(err_path, "a") as f:
+            f.write("\n--- query ---\n")
+            f.write(qr.stderr)
+
+    # --- Clean up ---
+    if not args.keep_data and outfile.exists():
+        outfile.unlink()
+
+
+def _bench_lemonhash(cfg, method_name, n, log2_n, rdir, args):
+    """Run a LeMonHash benchmark: build and query in one invocation.
+
+    bench_lemonhash <n> <query_keys> <repeats>
+    Output goes to stderr.
+    """
+    cmd = [str(Path(REPO_ROOT) / "bench_lemonhash")]
+    qkeys = cfg.get("query_keys", QUERY_KEYS)
+    cmd += [str(n), str(qkeys), "5"]
+
+    print(f"  bench {method_name} n=2^{log2_n}")
+    result = run_cmd(cmd, pin=args.pin, dry_run=args.dry_run)
+
+    if args.dry_run:
+        return
+
+    if result.returncode != 0:
+        (rdir / f"bench.{n}.0.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
+        return
+
+    output = result.stderr
+    (rdir / f"bench.{n}.0.err").write_text(output)
+
+
+def _bench_mmphf_str(cfg, method_name, dataset, rdir, args):
+    """Run a LcpMmphfStr/Lcp2MmphfStr benchmark on a string dataset.
+
+    Build:  lcp_mmphf -f <datafile> --unaligned --threads 1 [-2] <outfile>
+    Query:  bench_lcp_mmphf <query_keys> <outfile> -f <datafile>
+            --unaligned [-2] --repeats 5
+    """
+    target = sux_target_dir(args.sux_dir)
+    ddir = data_dir(args.results_dir, method_name)
+    outfile = ddir / f"func.{dataset}.bin"
+    datafile = str(Path(DATA_DIR) / dataset)
+
+    # --- Build (pinned — single-threaded, matches LeMonHashStr build) ---
+    cmd = [str(target / "release" / "lcp_mmphf")]
+    cmd += ["-f", datafile]
+    if args.unaligned:
+        cmd += ["--unaligned"]
+    cmd += ["--threads", "1"]
+    if cfg.get("variant") == "lcp2":
+        cmd += ["-2"]
+    cmd += [str(outfile)]
+
+    print(f"  bench {method_name} dataset={dataset}")
+    result = run_cmd(cmd, pin=args.pin, dry_run=args.dry_run)
+
+    # --- Query (pinned, only if build succeeded) ---
+    qkeys = cfg.get("query_keys", QUERY_KEYS)
+    qcmd = [str(target / "release" / "examples" / "bench_lcp_mmphf")]
+    qcmd += [str(qkeys), str(outfile)]
+    qcmd += ["-f", datafile]
+    if args.unaligned:
+        qcmd += ["--unaligned"]
+    if cfg.get("variant") == "lcp2":
+        qcmd += ["-2"]
+    qcmd += ["--repeats", "5"]
+    qr = None
+    if args.dry_run or result.returncode == 0:
+        qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
+
+    if args.dry_run:
+        return
+
+    build_output = result.stderr
+    if result.returncode != 0:
+        (rdir / f"bench.{dataset}.0.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
+        return
+
+    err_path = rdir / f"bench.{dataset}.0.err"
+    err_path.write_text(build_output)
+
+    # For string datasets we don't know n upfront; parse it from the log.
+    n = _parse_n_from_build(build_output)
+    warn = size_check(outfile, n, build_output) if n else None
+    if warn is not None:
+        with open(err_path, "a") as f:
+            f.write(warn)
+
+    if qr is not None and qr.returncode == 0:
+        with open(err_path, "a") as f:
+            f.write("\n--- query ---\n")
+            f.write(qr.stderr)
+
+    # --- Clean up ---
+    if not args.keep_data and outfile.exists():
+        outfile.unlink()
+
+
+def _bench_lemonhash_str(cfg, method_name, dataset, rdir, args):
+    """Run a LeMonHashVL benchmark on a string dataset.
+
+    bench_lemonhash_str <file> <query_keys> <repeats>
+    Output goes to stderr.
+    """
+    cmd = [str(Path(REPO_ROOT) / "bench_lemonhash_str")]
+    qkeys = cfg.get("query_keys", QUERY_KEYS)
+    datafile = str(Path(DATA_DIR) / dataset)
+    cmd += [datafile, str(qkeys), "5"]
+
+    print(f"  bench {method_name} dataset={dataset}")
+    result = run_cmd(cmd, pin=args.pin, dry_run=args.dry_run)
+
+    if args.dry_run:
+        return
+
+    if result.returncode != 0:
+        (rdir / f"bench.{dataset}.0.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
+        return
+
+    output = result.stderr
+    (rdir / f"bench.{dataset}.0.err").write_text(output)
+
+
+def _bench_csf(cfg, method_name, n, log2_n, rdir, args):
+    """Run a single CSF benchmark: build, serialize, query, delete.
+
+    Same separation as BuRR: build unpinned with -Q -w, query pinned
+    with -r.  Results stored with bits=0.
+    """
+    ddir = data_dir(args.results_dir, method_name)
+    outfile = ddir / f"csf.{n}.bin"
+
+    # --- Build (unpinned, no queries, serialize) ---
+    cmd = csf_build_cmd(cfg, n, outfile)
+    print(f"  bench {method_name} n=2^{log2_n}")
+    result = run_cmd(cmd, dry_run=args.dry_run)
+
+    # --- Query (pinned, only if build succeeded) ---
+    qr = None
+    if args.dry_run or result.returncode == 0:
+        qcmd = csf_query_cmd(cfg, n, outfile)
+        qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
+
+    if args.dry_run:
+        return
+
+    build_output = result.stdout
+    if result.returncode != 0:
+        (rdir / f"bench.{n}.0.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
+        return
+
+    err_path = rdir / f"bench.{n}.0.err"
+    err_path.write_text(build_output)
+
+    warn = size_check(outfile, n, build_output)
+    if warn is not None:
+        with open(err_path, "a") as f:
+            f.write(warn)
+
+    if qr is not None and qr.returncode == 0:
+        with open(err_path, "a") as f:
+            f.write("\n--- query ---\n")
+            f.write(qr.stdout)
+
+    # --- Clean up ---
+    if not args.keep_data and outfile.exists():
+        outfile.unlink()
+
+
+def _bench_sux(cfg, method_name, n, bits, log2_n, rdir, args):
+    """Run a single sux-rs benchmark: build, query, delete.
+
+    Build with vfilter (unpinned, may use multiple threads), then
+    query with bench_vfilter (pinned), then delete.
+    """
+    ddir = data_dir(args.results_dir, method_name)
+    outfile = ddir / f"filter.{n}.{bits}.bin"
+
+    # The HEM ablation is driven exactly like a sux-rs method: same build /
+    # query split, same output format, only different binaries.
+    is_hem = cfg["tool"] == "hem"
+    build_cmd_fn = hem_build_cmd if is_hem else sux_build_cmd
+    query_cmd_fn = hem_query_cmd if is_hem else sux_query_cmd
+
+    # --- Build (unpinned) ---
+    cmd = build_cmd_fn(cfg, n, bits, outfile, args)
+    bits_str = f" bits={bits}" if bits > 0 else ""
+    print(f"  bench {method_name} n=2^{log2_n}{bits_str}")
+    result = run_cmd(cmd, dry_run=args.dry_run)
+
+    # --- Query (pinned by default; see cfg["pin_query"]) ---
+    qr = None
+    if not cfg.get("no_queries"):
+        qcmd = query_cmd_fn(cfg, n, bits, outfile, args)
+        if args.dry_run or result.returncode == 0:
+            pin = args.pin if cfg.get("pin_query", True) else None
+            qr = run_cmd(qcmd, pin=pin, dry_run=args.dry_run)
+
+    if args.dry_run:
+        return
+
+    build_output = result.stderr
+    if result.returncode != 0:
+        (rdir / f"bench.{n}.{bits}.err").write_text(
+            (result.stdout or "") + (result.stderr or ""))
+        return
+
+    err_path = rdir / f"bench.{n}.{bits}.err"
+    err_path.write_text(build_output)
+
+    warn = size_check(outfile, n, build_output)
+    if warn is not None:
+        with open(err_path, "a") as f:
+            f.write(warn)
+
+    if qr is not None and qr.returncode == 0:
+        with open(err_path, "a") as f:
+            f.write("\n--- query ---\n")
+            f.write(qr.stderr)
+
+    # --- Clean up ---
+    if not args.keep_data and outfile.exists():
+        outfile.unlink()
+
+
+def _bench_java(cfg, method_name, n, bits, log2_n, rdir, args):
+    """Run a single Sux4J benchmark: Java build+dump, C query, clean up."""
+    ddir = data_dir(args.results_dir, method_name)
+    is_compressed = cfg["java_type"] == "GV3CompressedFunction"
+    suffix = "func" if is_compressed else "filter"
+    outfile = ddir / f"{suffix}.{n}.{bits}.bin"
+
+    # --- Java build + dump (unpinned) ---
+    cmd = java_build_cmd(cfg, n, bits, outfile)
+    bits_str = f" bits={bits}" if bits > 0 else ""
+    print(f"  bench {method_name} n=2^{log2_n}{bits_str}")
+    result = run_cmd(cmd, dry_run=args.dry_run)
+
+    if args.dry_run:
+        return
+
+    if result is None or result.returncode != 0:
+        err_text = ""
+        if result:
+            err_text = (result.stdout or "") + (result.stderr or "")
+        (rdir / f"bench.{n}.{bits}.err").write_text(err_text)
+        return
+
+    err_path = rdir / f"bench.{n}.{bits}.err"
+    build_output = result.stderr or ""
+    err_path.write_text(build_output)
+
+    warn = size_check(outfile, n, build_output)
+    if warn is not None:
+        with open(err_path, "a") as f:
+            f.write(warn)
+
+    # --- C query (pinned) ---
+    qcmd = java_query_cmd(cfg, bits, outfile)
+    qr = run_cmd(qcmd, pin=args.pin, dry_run=args.dry_run)
+
+    if qr is not None and qr.returncode == 0:
+        with open(err_path, "a") as f:
+            f.write("\n--- query ---\n")
+            f.write(qr.stdout)
+
+    # --- Clean up ---
+    if not args.keep_data and outfile.exists():
+        outfile.unlink()
+
+
+# =====================================================================
+#  Subcommand: multi-bench
+# =====================================================================
+
+# Shard edges supported by multi_vfilter.
+MULTI_SHARD_EDGES = ("fuse-aug3-shards", "fuse3-no-shards64",
+                     "fuse3-no-shards128", "mwhc3")
+
+# Log2 of the total number of keys of the multi-bench sweep: each size n is
+# tested on 2^MULTI_TOTAL_LOG2 / n structures.
+MULTI_TOTAL_LOG2 = 33
+
+
+def multi_target_dir(novec=False):
+    """Return the cargo target directory of the multi-vfilter crate.
+
+    Respects CARGO_TARGET_DIR, as sux_target_dir does.
+    """
+    return sux_target_dir(Path(REPO_ROOT) / "multi-vfilter", novec)
+
+
+def ensure_multi_built(novec=False):
+    """Compile the BuRR-style parallel benchmark for VFilter (with novec,
+    with the loop vectorizer disabled, see cargo_build)."""
+    crate = Path(REPO_ROOT) / "multi-vfilter"
+    print(f"Building multi-vfilter{' (novec)' if novec else ''} in {crate}…")
+    r = cargo_build(crate, ["--profile", SUX_PROFILE], novec)
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr)
+        sys.exit(f"multi-vfilter build failed (exit {r.returncode})")
+
+
+def ensure_burr_parbench_built(burr_dir, bits_values, target="parbench"):
+    """Compile BuRR's parbench (or the given variant) for each requested bit
+    width.
+
+    As in ensure_burr_built, the binary (e.g., parbench8) is rebuilt only
+    if it is older than some source file.
+    """
+    burr = Path(burr_dir)
+    if not burr.exists():
+        sys.exit(f"BuRR directory {burr} not found")
+    src_mtime = max(
+        (f.stat().st_mtime for f in burr.iterdir()
+         if f.suffix in (".cpp", ".hpp") or f.name == "Makefile"),
+        default=0.0,
+    )
+    for bits in bits_values:
+        binary = burr / f"{target}{bits}"
+        if binary.exists() and binary.stat().st_mtime >= src_mtime:
+            continue
+        print(f"Building BuRR {target}{bits} in {burr}…")
+        r = subprocess.run(
+            ["make", f"RIBBON_BITS={bits}",
+             "OPTFLAGS=-O3 -DNDEBUG -march=native -fPIE -fno-strict-aliasing",
+             target],
+            cwd=str(burr), capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            print(r.stderr, file=sys.stderr)
+            sys.exit(f"BuRR make parbench failed for RIBBON_BITS={bits}")
+
+
+def multi_func(cfg):
+    """The --func argument of multi_vfilter for the static functions that
+    multi-bench can run (VFunc and PHunc), or None. PHunc with a given
+    number of bits (phunc-bits) is queried as a filter."""
+    if cfg["tool"] == "sux" and cfg.get("build_bin") == "phunc":
+        return "phunc" if cfg.get("bits_agnostic", False) else "phunc-bits"
+    if cfg["tool"] == "sux" and cfg.get("build_bin") == "vfunc" and \
+            cfg.get("shard_edge") == "fuse-aug3-shards":
+        return "vfunc"
+    return None
+
+
+def multi_bits_agnostic(cfg):
+    """Whether a method of multi-bench runs once, with bits 0, whatever the
+    bit widths requested (the functions mapping each key to its index)."""
+    return (multi_func(cfg) is not None or cfg.get("index_values", False)) \
+        and cfg.get("bits_agnostic", False)
+
+
+def multi_methods(arg):
+    """Methods that multi-bench can run: VFilter with the shard edges
+    supported by multi_vfilter, BuRR, and the static functions of
+    multi_func."""
+    names = list(METHODS.keys()) if arg == "all" else resolve_methods(arg)
+    ok = []
+    for name in names:
+        cfg = METHODS[name]
+        if cfg.get("no_queries"):
+            if arg != "all":
+                sys.exit(f"multi-bench: {name} does not run queries")
+            continue
+        # parbench measures positive and negative queries in the same run;
+        # methods with a "multi_binary" have their own parbench variant
+        if cfg["tool"] == "burr" and cfg["burr_binary"] != "bench" and \
+                "multi_binary" not in cfg:
+            if arg != "all":
+                sys.exit(f"multi-bench: use BuRR instead of {name}")
+            continue
+        if cfg["tool"] == "sux" and cfg.get("build_bin") == "vfilter" and \
+                cfg.get("shard_edge") in MULTI_SHARD_EDGES:
+            ok.append(name)
+        elif cfg["tool"] == "burr" or multi_func(cfg) is not None:
+            ok.append(name)
+        elif arg != "all":
+            sys.exit(f"multi-bench does not support {name}")
+    return ok
+
+
+def burr_eps_numerator(cfg, burr_eps):
+    """Return (f, L) such that parbench is run with ε = -f / L.
+
+    parbench takes the number of slots m and builds m / (1 + ε) keys. With
+    burr_eps == "bench" we use the ε that the bench binary (ribbon.cpp),
+    used for all other BuRR results, picks by default: -4 / L for L > 32,
+    -3 / L otherwise; with burr_eps == "parbench" we use the default of
+    parbench.cpp, -3 / L.
+    """
+    flags = cfg["burr_flags"]
+    width = int(flags[flags.index("-L") + 1])
+    if burr_eps == "bench" and width > 32:
+        return 4, width
+    return 3, width
+
+
+def burr_slots(cfg, n, burr_eps):
+    """Number of slots per filter that makes parbench build n keys."""
+    f, width = burr_eps_numerator(cfg, burr_eps)
+    if (n * (width - f)) % width != 0:
+        sys.exit(f"multi-bench: with ε = -{f}/{width} the number of keys"
+                 f" must be a multiple of {width}")
+    return n * (width - f) // width
+
+
+def multi_cmd(cfg, n, bits, k, q, t, b, args):
+    """Assemble the command line of one multi-bench run."""
+    func = multi_func(cfg)
+    if func is not None:
+        # Bits-agnostic functions (bits is zero) have only positive queries
+        cmd = [str(multi_target_dir(cfg.get("novec", False)) / "release" /
+                   "multi-vfilter")]
+        cmd += ["-n", str(n), "-k", str(k), "-q", str(q),
+                "-t", str(t), "-b", str(b), "--bits", str(bits),
+                "--func", func]
+    elif cfg["tool"] == "sux":
+        cmd = [str(multi_target_dir(cfg.get("novec", False)) / "release" /
+                   "multi-vfilter")]
+        cmd += ["-n", str(n), "-k", str(k), "-q", str(q),
+                "-t", str(t), "-b", str(b)]
+        cmd += ["--bits", str(bits), "--shard-edge", cfg["shard_edge"]]
+        # Per-method extras: --seed, --eps
+        cmd += cfg.get("build_extra", [])
+    else:
+        burr = Path(args.burr_dir)
+        f, width = burr_eps_numerator(cfg, args.burr_eps)
+        binary = cfg.get("multi_binary", "parbench")
+        cmd = [str(burr / f"{binary}{burr_bits(cfg, n, bits)}")]
+        cmd += ["-t", str(t), "-b", str(b)]
+        cmd += cfg["burr_flags"]
+        cmd += ["-e", repr(-f / width)]
+        cmd += ["-k", str(k), "-m", str(burr_slots(cfg, n, args.burr_eps)),
+                "-q", str(q)]
+    return cmd
+
+
+def parse_multi(text):
+    """Parse the last RESULT type=agg line of parbench or multi_vfilter
+    into a dictionary of floats (non-numeric values are skipped)."""
+    for line in reversed(text.splitlines()):
+        if line.startswith("RESULT type=agg"):
+            res = {}
+            for tok in line.split()[2:]:
+                key, _, value = tok.partition("=")
+                try:
+                    res[key] = float(value)
+                except ValueError:
+                    pass
+            return res
+    return None
+
+
+def multi_result_path(results_dir, method_name, cfg, n, bits, k, t, q, b,
+                      args):
+    """Result file of a run; BuRR files also record the choice of ε."""
+    suffix = f".eps-{args.burr_eps}" if cfg["tool"] == "burr" else ""
+    return result_dir(results_dir, method_name) / \
+        f"multibench.{n}.{bits}.{k}.{t}.{q}.{b}{suffix}.out"
+
+
+def multi_ok(res, cfg, n, k):
+    """Check a parsed result: all positive queries found, right size."""
+    if res is None or res.get("n") != n:
+        return False
+    if cfg["tool"] == "burr":
+        return res.get("ok") == 1
+    return res.get("k") == k
+
+
+def multi_configs(args):
+    """The (keys, structures) pairs of a multi-bench run: --keys and
+    --filters if --keys is given; otherwise, for each n = 2^l with l in
+    [--min-log2 . . --max-log2], 2^--total-log2 / n structures of n keys, so
+    that the total number of keys, and thus the memory, is the same for
+    all sizes."""
+    if args.keys is not None:
+        return [(args.keys, args.filters)]
+    total = args.total_log2
+    max_log2 = total if args.max_log2 is None else min(args.max_log2, total)
+    return [(1 << l, 1 << (total - l))
+            for l in range(args.min_log2, max_log2 + 1)]
+
+
+def multi_report(methods, bits_list, threads_list, configs, q, b, args):
+    """Print a TSV table of the multi-bench results that exist."""
+    print("\t".join(["method", "bits", "threads", "keys", "structures",
+                     "pos_ns", "neg_ns", "constr_s", "bits_per_key", "fpr"]))
+    for t, bits, (n, k) in itertools.product(threads_list, bits_list,
+                                             configs):
+        for method_name in methods:
+            cfg = METHODS[method_name]
+            # The bits of this method: bits itself must not change, as it
+            # is used by the methods that follow
+            bits_m = bits
+            if multi_bits_agnostic(cfg):
+                # Bits-agnostic functions are reported once, as bits 0
+                if bits != bits_list[0]:
+                    continue
+                bits_m = 0
+            path = multi_result_path(args.results_dir, method_name, cfg,
+                                     n, bits_m, k, t, q, b, args)
+            if not path.exists():
+                continue
+            res = parse_multi(path.read_text())
+            if res is None:
+                continue
+            label = method_name
+            if cfg["tool"] == "burr":
+                f, width = burr_eps_numerator(cfg, args.burr_eps)
+                label += f"(eps=-{f}/{width})"
+            print("\t".join([
+                label, str(bits_m), str(t), str(n), str(k),
+                f"{res['tpospq']:.2f}", f"{res.get('tneqpq', math.nan):.2f}",
+                f"{res['tcons'] / 1e3:.2f}",
+                f"{res['totalbytes'] * 8 / (n * k):.3f}",
+                f"{res.get('fpr', math.nan):.3g}",
+            ]))
+
+
+def cmd_multi_bench(args):
+    """BuRR-style parallel query benchmark.
+
+    Replicates the highly parallel workload of the BuRR paper, which uses
+    BuRR's parbench.cpp: k structures with n keys each (the same keys,
+    different seeds) are built in a single process with --build-threads
+    threads, and then each of t query threads performs --queries positive
+    and then --queries negative queries, each on a structure chosen at
+    random, for each t in --query-threads. The time per query is the total
+    query time of all threads divided by the number of queries. The (n, k)
+    pairs are given by multi_configs.
+
+    BuRR runs BuRR's parbench; VFilter runs multi_vfilter (multi-vfilter/),
+    which replicates parbench for sux-rs. Results are stored in
+    results/<method>/multibench.<n>.<bits>.<k>.<t>.<queries>.<build
+    threads>[.eps-<ε choice>].out.
+    """
+    methods = multi_methods(args.method)
+    bits_list = resolve_bits(args.bits)
+    threads_list = [int(t) for t in args.query_threads.split(",")]
+    configs = multi_configs(args)
+    q, b = args.queries, args.build_threads
+
+    if args.report:
+        multi_report(methods, bits_list, threads_list, configs, q, b, args)
+        return
+
+    # Fail now, not after hours of runs, if n is not compatible with BuRR
+    for method_name in methods:
+        if METHODS[method_name]["tool"] == "burr":
+            for n, _ in configs:
+                burr_slots(METHODS[method_name], n, args.burr_eps)
+
+    if not args.dry_run:
+        if any(METHODS[m]["tool"] == "sux" and not METHODS[m].get("novec")
+               for m in methods):
+            ensure_multi_built()
+        if any(METHODS[m].get("novec") for m in methods):
+            ensure_multi_built(novec=True)
+        if any(METHODS[m]["tool"] == "burr" and "multi_binary" not in METHODS[m]
+               for m in methods):
+            ensure_burr_parbench_built(args.burr_dir, bits_list)
+        for m in methods:
+            cfg = METHODS[m]
+            if cfg["tool"] == "burr" and "multi_binary" in cfg:
+                ensure_burr_parbench_built(
+                    args.burr_dir,
+                    sorted({burr_bits(cfg, n, 0) for n, _ in configs
+                            if n.bit_length() - 1 <= cfg.get("max_log2", 64)}),
+                    cfg["multi_binary"])
+
+    # Functions are bits-agnostic: they run once, with bits 0
+    func_done = set()
+
+    for t, bits, (n, k) in itertools.product(threads_list, bits_list,
+                                             configs):
+        for method_name in methods:
+            cfg = METHODS[method_name]
+            # Sizes beyond the method's own limit (e.g., BuRRFunc, which runs
+            # out of memory at 2^33 keys) are skipped
+            if n.bit_length() - 1 > cfg.get("max_log2", 64):
+                continue
+            bits_m = bits
+            if multi_bits_agnostic(cfg):
+                if (method_name, t, n) in func_done:
+                    continue
+                func_done.add((method_name, t, n))
+                bits_m = 0
+            path = multi_result_path(args.results_dir, method_name, cfg,
+                                     n, bits_m, k, t, q, b, args)
+            if not args.force and path.exists() and \
+                    multi_ok(parse_multi(path.read_text()), cfg, n, k):
+                continue
+            cmd = multi_cmd(cfg, n, bits_m, k, q, t, b, args)
+            print(f"  multi-bench {method_name} n={n} k={k} bits={bits_m}"
+                  f" threads={t}", flush=True)
+            r = run_cmd(cmd, dry_run=args.dry_run)
+            if args.dry_run:
+                continue
+            text = r.stdout + r.stderr
+            if r.returncode == 0 and \
+                    multi_ok(parse_multi(text), cfg, n, k):
+                path.write_text(text)
+            else:
+                # A stale result of an earlier run must not be reported
+                path.unlink(missing_ok=True)
+                path.with_suffix(".failed").write_text(text)
+                print(f"  ERROR: no result recorded (see "
+                      f"{path.with_suffix('.failed')})", file=sys.stderr,
+                      flush=True)
+
+    if not args.dry_run:
+        multi_report(methods, bits_list, threads_list, configs, q, b, args)
+    print("Done.")
+
+
+# =====================================================================
+#  Subcommand: report
+# =====================================================================
+
+
+def _parse_n_from_build(text):
+    """Extract the key count from sux-rs build output.
+
+    Looks for lines like "Found N keys" or "(N keys," in the
+    construction summary.
+    """
+    import re
+    m = re.search(r'(?:Found|Loaded)\s+(\d+)\s+keys', text)
+    if m:
+        return int(m.group(1))
+    m = re.search(r'\((\d+)\s+keys', text)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def cmd_report(args):
+    """Print a space-aligned report of available results to stdout.
+
+    Columns:
+        n  dataset  bits  method  constr_ns  query_min  query_median
+        query_max  query_avg  bits_per_key  overhead_pct
+
+    For filters (sux, burr), overhead_pct is relative to the bit width.
+    For compressed functions (csf, comp-vfunc), it is relative to the
+    distribution entropy.
+
+    Columns are padded with spaces for readability; spaces are
+    non-significant so the output can still be split on whitespace.
+    """
+    methods = resolve_methods(args.method)
+    bits_list = resolve_bits(args.bits)
+
+    cols = ["n", "dataset", "bits", "method", "constr_ns", "query_min",
+            "query_median", "query_max", "query_avg", "bits_per_key",
+            "overhead_pct"]
+
+    rows = []
+    for method_name in methods:
+        cfg = METHODS[method_name]
+        rdir = Path(args.results_dir) / method_name
+        if not rdir.exists():
+            continue
+
+        tool_for_parse = _parse_tool(cfg["tool"])
+
+        # String-dataset methods: scan the result directory.
+        if cfg["tool"] in ("mmphf-str", "lemonhash-str"):
+            import re
+            for f in sorted(rdir.iterdir()):
+                m = re.match(r'bench\.(.+)\.0\.err$', f.name)
+                if not m:
+                    continue
+                dataset = m.group(1)
+                text = f.read_text()
+                bd = parse_build(text, tool_for_parse)
+                qd = parse_query(text, tool_for_parse)
+
+                n = _parse_n_from_build(text)
+                n_str = str(n) if n else ""
+
+                bpk_val = parse_bits_per_key(text, n)
+                bpk = f"{bpk_val:.2f}" if bpk_val is not None else ""
+
+                rows.append([
+                    n_str, dataset, "0", method_name,
+                    _fmt(bd.get("constr_ns")),
+                    _fmt(qd.get("query_min")),
+                    _fmt(qd.get("query_median")),
+                    _fmt(qd.get("query_max")),
+                    _fmt(qd.get("query_avg")),
+                    bpk,
+                    "",
+                ])
+            continue
+
+        # Standard size-based methods.
+        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in BITS_AGNOSTIC_TOOLS)
+        method_bits = [0] if bits_agnostic else bits_list
+
+        entropy = distribution_entropy(cfg.get("distribution"))
+
+        explicit_sizes = cfg.get("sizes")
+        for bits in method_bits:
+            if explicit_sizes is not None:
+                sizes = explicit_sizes
+            else:
+                max_log2 = effective_max_log2(args, cfg, bits)
+                sizes = [1 << log2 for log2 in range(MIN_LOG2, max_log2 + 1)]
+            for n in sizes:
+                bench_err = rdir / f"bench.{n}.{bits}.err"
+                if not bench_err.exists():
+                    continue
+                text = bench_err.read_text()
+                bd = parse_build(text, tool_for_parse)
+                qd = parse_query(text, tool_for_parse)
+
+                bpk_val = parse_bits_per_key(text, n)
+                bpk = f"{bpk_val:.2f}" if bpk_val is not None else ""
+                overhead = ""
+                if bpk_val is not None:
+                    if bits > 0:
+                        overhead = f"{compute_overhead(bpk_val, bits):.2f}"
+                    elif entropy is not None:
+                        overhead = f"{compute_overhead(bpk_val, entropy):.2f}"
+
+                rows.append([
+                    str(n), "", str(bits), method_name,
+                    _fmt(bd.get("constr_ns")),
+                    _fmt(qd.get("query_min")),
+                    _fmt(qd.get("query_median")),
+                    _fmt(qd.get("query_max")),
+                    _fmt(qd.get("query_avg")),
+                    bpk,
+                    overhead,
+                ])
+
+    widths = [len(c) for c in cols]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+
+    def fmt_row(cells):
+        return "  ".join(cell.rjust(widths[i]) for i, cell in enumerate(cells))
+
+    print(fmt_row(cols))
+    for row in rows:
+        print(fmt_row(row))
+
+
+def _fmt(v):
+    """Format a numeric value for the report, leaving empty string for None."""
+    if v is None or v == "":
+        return ""
+    return f"{v:.2f}" if isinstance(v, float) else str(v)
+
+
+# =====================================================================
+#  Subcommand: plot
+# =====================================================================
+
+
+def cmd_plot(args):
+    """Generate paper figures from benchmark results.
+
+    Reads the same result files as 'report' and produces one PDF per
+    (figure, bits) combination in the output directory (one PDF per figure
+    for presets with "series_bits" and for bits-agnostic presets). The
+    style (e.g., TeX's fonts) is set by the matplotlibrc file in the
+    repository root, whatever the current directory.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        matplotlib.rc_file(os.path.join(REPO_ROOT, "matplotlibrc"))
+        import matplotlib.pyplot as plt
+    except ImportError:
+        sys.exit("matplotlib is required for plotting: pip install matplotlib")
+
+    if args.figure == "all":
+        figure_names = list(FIGURES.keys())
+    else:
+        if args.figure not in FIGURES:
+            sys.exit(f"Unknown figure: {args.figure}\n"
+                     f"Available: {', '.join(FIGURES)}")
+        figure_names = [args.figure]
+
+    for figure_name in figure_names:
+        _plot_one(figure_name, args, plt)
+
+
+# Values of the figures, keyed by (result dir, n, bits, column, tool), so
+# that each result file is parsed once.
+_figure_values = {}
+
+
+def _figure_value(rdir, n, bits, col, tool):
+    """The value of a column for a method, size and bit width, or None."""
+    key = (rdir, n, bits, col, tool)
+    if key not in _figure_values:
+        bench_err = rdir / f"bench.{n}.{bits}.err"
+        val = None
+        if col == "constr_ns" and bench_err.exists():
+            val = parse_build(bench_err.read_text(), tool).get("constr_ns")
+        elif col.startswith("query_") and bench_err.exists():
+            val = parse_query(bench_err.read_text(), tool).get(col)
+        elif col in ("multi_neg", "multi_pos"):
+            val = _multi_value(rdir, n, bits, col)
+        _figure_values[key] = val
+    return _figure_values[key]
+
+
+def _multi_value(rdir, n, bits, col):
+    """The time per negative (multi_neg) or positive (multi_pos) query of a
+    multi-bench sweep result for n keys per structure, or None.
+
+    Only results of the sweep (2^MULTI_TOTAL_LOG2 / n structures) are used,
+    and, for BuRR, only those with the ε of the bench binary. If there are
+    several results, we use the one with the most query threads (then the
+    most queries, then the most construction threads).
+    """
+    k = (1 << MULTI_TOTAL_LOG2) // n
+    best = None
+    for path in rdir.glob(f"multibench.{n}.{bits}.{k}.*.out"):
+        # multibench.<n>.<bits>.<k>.<t>.<q>.<b>[.eps-<choice>].out
+        parts = path.name.split(".")
+        if len(parts) not in (8, 9) or \
+                (len(parts) == 9 and parts[7] != "eps-bench"):
+            continue
+        rank = (int(parts[4]), int(parts[5]), int(parts[6]))
+        if best is None or rank > best[0]:
+            best = (rank, path)
+    if best is None:
+        return None
+    res = parse_multi(best[1].read_text())
+    if res is None:
+        return None
+    return res.get("tneqpq" if col == "multi_neg" else "tpospq")
+
+
+def _bits_agnostic(fig_cfg):
+    """Whether all methods of a figure preset are bits-agnostic."""
+    return all(
+        METHODS[m].get("bits_agnostic", METHODS[m]["tool"] in BITS_AGNOSTIC_TOOLS)
+        for m in fig_cfg["methods"] if m in METHODS
+    )
+
+
+def _panel_bits(fig_cfg, bits_list):
+    """The bit widths of the plots of a figure preset: a single plot (None)
+    for presets with "series_bits", a single plot for bit width 0 for
+    bits-agnostic presets, and one plot per bit width otherwise."""
+    if "series_bits" in fig_cfg:
+        return [None]
+    if _bits_agnostic(fig_cfg):
+        return [0]
+    return bits_list
+
+
+def _figure_series(fig_cfg, bits, args):
+    """The series of a plot of a figure preset, as (method, position, label,
+    linestyle, points) tuples, where position is the index of the bit width
+    in "series_bits" (None for presets without it), and points are (n,
+    value) pairs. Series without points are omitted.
+
+    A preset has either a "column", or a list of "columns", that is, of
+    (column, label suffix, line style) triples, which yields a series per
+    method and column; "method_columns" maps methods to lists of triples
+    replacing "columns" for those methods."""
+    series_bits = fig_cfg.get("series_bits")
+    result = []
+    for method_name in fig_cfg["methods"]:
+        cfg = METHODS.get(method_name)
+        if cfg is None:
+            continue
+        # Methods drawn only at some widths
+        if bits not in fig_cfg.get("method_bits", {}).get(method_name, [bits]):
+            continue
+        rdir = Path(args.results_dir) / method_name
+        if not rdir.exists():
+            continue
+        tool_for_parse = _parse_tool(cfg["tool"])
+        label = fig_cfg.get("labels", {}).get(method_name, cfg["label"])
+        widths = list(enumerate(series_bits)) if series_bits else [(None, bits)]
+        for (pos, b), (col, suffix, linestyle) in itertools.product(
+                widths, _figure_columns(fig_cfg, method_name, cfg)):
+            points = []
+            for log2_n in range(MIN_LOG2, effective_max_log2(args, cfg, b) + 1):
+                n = 1 << log2_n
+                val = _figure_value(rdir, n, b, col, tool_for_parse)
+                if val is not None:
+                    points.append((n, val))
+            if points:
+                name = label + suffix
+                result.append((method_name, pos,
+                               name if pos is None else f"{name}, {b} bits",
+                               linestyle, points))
+    # Methods drawn again from the results of a vectorized campaign
+    # ("vec_methods", from --vec-results-dir), with the same style but dashed
+    result += _figure_other_series(fig_cfg, fig_cfg.get("vec_methods", {}),
+                                   getattr(args, "vec_results_dir", None),
+                                   bits, args)
+    return result
+
+
+def _figure_other_series(fig_cfg, methods, other_dir, bits, args):
+    """The dashed series of a figure preset drawn from the results of
+    another campaign, in other_dir, for the methods of a dictionary mapping
+    each method to its label."""
+    result = []
+    for method_name, vec_label in methods.items():
+        cfg = METHODS.get(method_name)
+        if other_dir is None or cfg is None:
+            continue
+        rdir = Path(other_dir) / method_name
+        if not rdir.exists():
+            continue
+        tool_for_parse = _parse_tool(cfg["tool"])
+        for col, suffix, _ in _figure_columns(fig_cfg, method_name, cfg):
+            points = []
+            for log2_n in range(MIN_LOG2,
+                                effective_max_log2(args, cfg, bits) + 1):
+                n = 1 << log2_n
+                val = _figure_value(rdir, n, bits, col, tool_for_parse)
+                if val is not None:
+                    points.append((n, val))
+            if points:
+                result.append((method_name, None, vec_label + suffix, "--",
+                               points))
+    return result
+
+
+def _figure_columns(fig_cfg, method_name, cfg):
+    """The (column, label suffix, line style) triples of a method in a figure
+    preset: those of "method_columns" for the method, else those of
+    "columns", else a single triple for "column"."""
+    return fig_cfg.get("method_columns", {}).get(method_name) or \
+        fig_cfg.get("columns") or \
+        [(fig_cfg["column"], "", cfg.get("linestyle", "-"))]
+
+
+def _figure_ymax(figure_name, bits_list, args):
+    """The upper limit of the vertical axis of the plots of a figure preset:
+    the largest value of all plots of its "y_group", times its
+    "ymax_factor"."""
+    group = FIGURES[figure_name].get("y_group", figure_name)
+    ymax = 0.0
+    for name, fig_cfg in FIGURES.items():
+        if fig_cfg.get("y_group", name) != group:
+            continue
+        for bits in _panel_bits(fig_cfg, bits_list):
+            for *_, points in _figure_series(fig_cfg, bits, args):
+                ymax = max(ymax, max(v for _, v in points))
+    return FIGURES[figure_name].get("ymax_factor", 1.15) * ymax
+
+
+def _figure_styles(figure_name):
+    """The style indices of the methods of a figure preset: the position of
+    each method in the list of the methods of all presets of its
+    "style_group", in order of first appearance. A method has thus the same
+    color and marker in all plots of the group, whatever the other methods
+    of each plot, and whether or not they have points."""
+    group = FIGURES[figure_name].get("style_group", figure_name)
+    methods = list(STYLE_ORDER.get(group, []))
+    for name, fig_cfg in FIGURES.items():
+        if fig_cfg.get("style_group", name) != group:
+            continue
+        for method_name in fig_cfg["methods"]:
+            # Methods with "style_as" borrow the style of another method
+            if method_name not in methods and \
+                    "style_as" not in METHODS[method_name]:
+                methods.append(method_name)
+    styles = {method_name: i for i, method_name in enumerate(methods)}
+    for name, fig_cfg in FIGURES.items():
+        if fig_cfg.get("style_group", name) != group:
+            continue
+        for method_name in fig_cfg["methods"]:
+            other = METHODS[method_name].get("style_as")
+            if other is not None:
+                styles[method_name] = styles[other]
+    return styles
+
+
+def _plot_one(figure_name, args, plt):
+    """Generate PDFs for a single figure preset."""
+    fig_cfg = FIGURES[figure_name]
+    markers = ["o", "s", "^", "v", "p", "*", "h", "D"]
+    # Styles after the ten colors of the default cycle
+    extra_styles = [("black", "X"), ("gray", "P")]
+    bits_list = resolve_bits(args.bits)
+    global_ymax = _figure_ymax(figure_name, bits_list, args)
+    styles = _figure_styles(figure_name)
+    # With "series_bits", each method has a style for each bit width
+    widths = len(fig_cfg.get("series_bits", [None]))
+
+    for bits in _panel_bits(fig_cfg, bits_list):
+        plt.figure(figsize=(8, 5.5))
+        series = _figure_series(fig_cfg, bits, args)
+        for method_name, pos, label, linestyle, points in series:
+            si = styles[method_name] * widths + (pos or 0)
+            # "Cn" is the n-th color of the color cycle, which has ten colors
+            if si < 10:
+                color, marker = f"C{si}", markers[si % len(markers)]
+            else:
+                color, marker = extra_styles[(si - 10) % len(extra_styles)]
+            plt.plot([n for n, _ in points], [v for _, v in points],
+                     color=color,
+                     marker=marker,
+                     linestyle=linestyle,
+                     label=label)
+
+        title = fig_cfg["title"].format(bits=bits) if "{bits}" in fig_cfg["title"] else fig_cfg["title"]
+        plt.title(title)
+        plt.xlabel("Number of keys")
+        plt.ylabel(fig_cfg["ylabel"])
+        plt.xscale("log")
+        if series:
+            # By default, the location set by matplotlibrc
+            plt.legend(loc=fig_cfg.get("legend_loc"),
+                       ncol=fig_cfg.get("legend_ncol", 1))
+        if global_ymax > 0:
+            plt.ylim(0, global_ymax)
+
+        out_dir = Path(args.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        suffix = "" if bits in (None, 0) else f"-{bits}"
+        out_path = out_dir / f"{figure_name}{suffix}.pdf"
+        # Without a creation date, unchanged figures are identical files
+        plt.savefig(str(out_path), format="pdf", metadata={"CreationDate": None})
+        plt.close()
+        print(f"  saved {out_path}")
+
+
+# =====================================================================
+#  Subcommand: status
+# =====================================================================
+
+
+def cmd_status(args):
+    """Show a summary of completed and pending benchmark runs."""
+    methods = resolve_methods(args.method)
+    bits_list = resolve_bits(args.bits)
+    datasets = list_datasets()
+
+    for method_name in methods:
+        cfg = METHODS[method_name]
+        rdir = Path(args.results_dir) / method_name
+        tool_for_parse = _parse_tool(cfg["tool"])
+
+        # String-dataset methods: count by dataset files.
+        if cfg["tool"] in ("mmphf-str", "lemonhash-str"):
+            total = len(datasets)
+            done = sum(
+                1 for d in datasets
+                if result_complete(rdir / f"bench.{d}.0.err", tool_for_parse)
+            )
+            print(f"{method_name:24s}  bench {done}/{total}")
+            continue
+
+        done_bench = 0
+        total = 0
+        bits_agnostic = cfg.get("bits_agnostic", cfg["tool"] in BITS_AGNOSTIC_TOOLS)
+        method_bits = [0] if bits_agnostic else bits_list
+
+        explicit_sizes = cfg.get("sizes")
+        for bits in method_bits:
+            if explicit_sizes is not None:
+                sizes = explicit_sizes
+            else:
+                max_log2 = effective_max_log2(args, cfg, bits)
+                sizes = [1 << log2 for log2 in range(MIN_LOG2, max_log2 + 1)]
+            for n in sizes:
+                total += 1
+                if result_complete(rdir / f"bench.{n}.{bits}.err", tool_for_parse,
+                                   no_queries=cfg.get("no_queries", False)):
+                    done_bench += 1
+
+        print(f"{method_name:24s}  bench {done_bench}/{total}")
+
+
+# =====================================================================
+#  Subcommand: clean
+# =====================================================================
+
+
+def cmd_clean(args):
+    """Delete result files and/or serialized data."""
+    methods = resolve_methods(args.method)
+
+    for method_name in methods:
+        rdir = Path(args.results_dir) / method_name
+        if not rdir.exists():
+            continue
+
+        if args.data_only:
+            # Only delete the serialized structure files.
+            ddir = rdir / "data"
+            if ddir.exists():
+                shutil.rmtree(ddir)
+                print(f"  deleted {ddir}")
+        else:
+            # Delete everything.
+            shutil.rmtree(rdir)
+            print(f"  deleted {rdir}")
+
+
+# =====================================================================
+#  Subcommand: table
+# =====================================================================
+
+
+# Table presets, each rendered by its own function (see cmd_table). The keys
+# are:
+#   - "rows": ordered list of (label, methods) rows; in "filter", methods is a
+#     dictionary mapping "constr_seq", "constr_par", "query_seq" and
+#     "query_par" to a method name or None (and, optionally, "query_par_col"
+#     to the multi-bench column, multi_neg by default); in "comp" and
+#     "java-comp", a list with a method for each distribution; in "java", a
+#     dictionary mapping "query" to a method name;
+#   - "methods": in "mmphf" and "mmphf-str", ordered list of (method, label)
+#     rows;
+#   - "bits_order": ordered list of bit widths (columns);
+#   - "dist_labels": headers of the column groups of the distributions;
+#   - "sizes": list of n values (a block or a table per size; in "mmphf", a
+#     column group per size). "mmphf-str" has a column group per dataset
+#     found in the results instead.
+
+TABLES = {
+    "filter": {
+        "rows": [
+            # BuRR queries stop at the first fingerprint bit that does not
+            # match, so they are measured both on negatives (the Weyl
+            # sequence used for all filters) and on keys
+            ("BuRR", {"constr_seq": "BuRR-seq", "constr_par": "BuRR",
+                      "query_seq": None, "query_par": None}),
+            ("BuRR-neg", {"constr_seq": None, "constr_par": None,
+                          "query_seq": "BuRR", "query_par": "BuRR"}),
+            ("BuRR-pos", {"constr_seq": None, "constr_par": None,
+                          "query_seq": "BuRR-pos", "query_par": "BuRR",
+                          "query_par_col": "multi_pos"}),
+            ("VFilter", {"constr_seq": "FuseAug3Shards-seq", "constr_par": "FuseAug3Shards",
+                       "query_seq": "FuseAug3Shards", "query_par": "FuseAug3Shards"}),
+            # The same, compiled with the loop vectorizer disabled (queries only)
+            ("VFilter-novec", {"constr_seq": None, "constr_par": None,
+                               "query_seq": "FuseAug3Shards-novec",
+                               "query_par": "FuseAug3Shards-novec"}),
+            # PHunc mapping each key to a value of the given number of bits
+            ("PHunc", {"constr_seq": "PHuncBits-seq", "constr_par": "PHuncBits",
+                       "query_seq": "PHuncBits", "query_par": "PHuncBits"}),
+            # The parallel queries are BuRR-style (multi-bench), which pits
+            # VFilter against BuRR only
+            ("MWHC", {"constr_seq": None, "constr_par": "Mwhc3",
+                      "query_seq": "Mwhc3", "query_par": None}),
+            # The sharding ablation: VFilter's construction, laid out as HEM
+            # would lay it out. Everything but the offset/seed indirection is
+            # held fixed, so the gap against the VFilter row is that
+            # indirection. Construction is single-threaded here (no augmented
+            # peeling, no parallel builder), so we report only queries.
+            ("HEM(Fuse)", {"constr_seq": None, "constr_par": None,
+                           "query_seq": "HemVFilter", "query_par": None}),
+            ("HEM(Fuse)-novec", {"constr_seq": None, "constr_par": None,
+                                 "query_seq": "HemVFilter-novec", "query_par": None}),
+            # HEM as actually shipped: Sux4J's GOV3, queried by the C code
+            # distributed with Sux4J. Its much finer sharding is forced by
+            # lazy Gaussian elimination, so its offset array is far larger.
+            ("HEM(GOV3)", {"constr_seq": None, "constr_par": None,
+                           "query_seq": "GOV3Function", "query_par": None}),
+            ("Fuse(64)", {"constr_seq": "Fuse3NoShards64", "constr_par": None,
+                          "query_seq": "Fuse3NoShards64", "query_par": None}),
+            ("Fuse(128)", {"constr_seq": "Fuse3NoShards128", "constr_par": None,
+                           "query_seq": "Fuse3NoShards128", "query_par": None}),
+        ],
+        "bits_order": [8, 16, 32, 9, 17, 33],
+        "sizes": [1 << 20, 1 << 30],
+    },
+    "mmphf": {
+        "methods": [
+            ("LcpMmphfInt", "LcpMmphf"),
+            ("Lcp2MmphfInt", "Lcp2Mmphf"),
+            ("LeMonHashInt", "LeMonHash"),
+        ],
+        "sizes": [1 << 20, 1 << 32],
+    },
+    "mmphf-str": {
+        "methods": [
+            ("LcpMmphfStr", "LcpMmphf"),
+            ("Lcp2MmphfStr", "Lcp2Mmphf"),
+            ("LeMonHashStr", "LeMonHash"),
+        ],
+    },
+    "comp": {
+        "rows": [
+            ("CompVFunc", ["CompVFunc-Geo", "CompVFunc-Zipf", "CompVFunc-Uni256"]),
+            ("BuRR-CSF", ["CSF-Geo", "CSF-Zipf", "CSF-Uni256"]),
+        ],
+        "dist_labels": ["Geometric", "Zipf", "Uniform"],
+        "sizes": [1 << 20, 1 << 29],
+    },
+    "java": {
+        "rows": [
+            ("VFilter", {"query": "FuseAug3Shards"}),
+            ("GOV3", {"query": "GOV3Function"}),
+        ],
+        "bits_order": [8, 16, 32, 9, 17, 33],
+        "sizes": [1 << 20, 1 << 30],
+    },
+    "java-comp": {
+        "rows": [
+            ("CompVFunc", ["CompVFunc-Geo", "CompVFunc-Zipf", "CompVFunc-Uni256"]),
+            ("GOV3Comp", ["GV3CompressedFunction-Geo", "GV3CompressedFunction-Zipf", "GV3CompressedFunction-Uni256"]),
+        ],
+        "dist_labels": ["Geometric", "Zipf", "Uniform"],
+        "sizes": [1 << 20, 1 << 28],
+    },
+}
+
+
+def _filter_cells(method_name, bits_order, path_fn, value_fn, results_dir):
+    """Cells of one half (sequential or parallel) of a row; a half with no
+    method or no data at all is rendered as dashes."""
+    if method_name is None or METHODS.get(method_name) is None:
+        return " & ---" * len(bits_order)
+    cfg = METHODS[method_name]
+    rdir = Path(results_dir) / method_name
+    tool_for_parse = _parse_tool(cfg["tool"])
+    vals = []
+    for bits in bits_order:
+        err = rdir / path_fn(bits)
+        vals.append(value_fn(err.read_text(), tool_for_parse) if err.exists() else "")
+    if not any(vals):
+        return " & ---" * len(bits_order)
+    return "".join(f" & {v}" for v in vals)
+
+
+def _filter_constr_row(label, variants, bits_order, n, args):
+    """Build one construction row (sequential | parallel, integer ns/key);
+    returns None if the row has no construction data at all."""
+    if variants["constr_seq"] is None and variants["constr_par"] is None:
+        return None
+
+    def value(text, tool):
+        v = parse_build(text, tool).get("constr_ns")
+        return "" if v is None else f"{v:.0f}"
+
+    row = label
+    for mode in ("constr_seq", "constr_par"):
+        row += _filter_cells(variants[mode], bits_order,
+                             lambda bits: f"bench.{n}.{bits}.err", value,
+                             args.results_dir)
+    return row + r" \\"
+
+
+def _filter_query_row(label, variants, bits_order, n, args):
+    """Build one query row (sequential from bench.err, parallel from the
+    BuRR-style multi-bench results with n keys per structure, using the
+    column variants["query_par_col"], multi_neg by default); returns None if
+    the row has no query data at all."""
+    if variants["query_seq"] is None and variants["query_par"] is None:
+        return None
+
+    def value(text, tool):
+        v = parse_query(text, tool).get("query_min")
+        return "" if v is None else f"{v:.1f}"
+
+    row = label
+    row += _filter_cells(variants["query_seq"], bits_order,
+                         lambda bits: f"bench.{n}.{bits}.err",
+                         value, args.results_dir)
+    method_name = variants["query_par"]
+    if method_name is None:
+        row += " & ---" * len(bits_order)
+    else:
+        rdir = Path(args.results_dir) / method_name
+        col = variants.get("query_par_col", "multi_neg")
+        vals = [_multi_value(rdir, n, bits, col) for bits in bits_order]
+        if all(v is None for v in vals):
+            row += " & ---" * len(bits_order)
+        else:
+            row += "".join(" & " if v is None else f" & {v:.1f}"
+                           for v in vals)
+    return row + r" \\"
+
+
+def _table_filter(tbl, args):
+    """Render the filter table: a single tabular with a construction block and
+    a query block per size, so that all blocks share the same columns."""
+    bits_order = tbl["bits_order"]
+    ncols = len(bits_order)
+    half = ncols // 2
+    # Narrow gaps between the two groups of widths, a wide gap between the
+    # sequential and parallel halves; @{} replaces the column separation, so
+    # these are the actual gaps.
+    group = "r" * half + r"@{\hspace{10pt}}" + "r" * half
+    colspec = "l" + group + r"@{\hspace{18pt}}" + group
+    print(r"\begin{tabular}{" + colspec + "}")
+    print(r"\toprule")
+    print(f"& \\multicolumn{{{ncols}}}{{c}}{{Sequential}}"
+          f" & \\multicolumn{{{ncols}}}{{c}}{{Parallel}} \\\\")
+    print(f"\\cmidrule(lr){{2-{ncols + 1}}}\\cmidrule(lr){{{ncols + 2}-{2 * ncols + 1}}}")
+    print("".join(f" & {bits}" for bits in bits_order) * 2 + r" \\")
+
+    for n in tbl["sizes"]:
+        log2_n = n.bit_length() - 1
+        for kind, row_fn in (("Construction", _filter_constr_row),
+                             ("Queries", _filter_query_row)):
+            print(r"\midrule")
+            print(f"\\multicolumn{{{2 * ncols + 1}}}{{l}}"
+                  f"{{\\emph{{{kind}, $n=2^{{{log2_n}}}$}}}} \\\\")
+            for label, variants in tbl["rows"]:
+                row = row_fn(label, variants, bits_order, n, args)
+                if row is not None:
+                    print(row)
+
+    print(r"\bottomrule")
+    print(r"\end{tabular}")
+
+
+# The gap between groups of columns of a table, which replaces vertical
+# rules (the groups are marked by rules under their headers).
+GROUP_GAP = r"@{\hspace{18pt}}"
+
+
+def _group_colspec(ngroups, width):
+    """Column specification of a label column followed by groups of columns
+    separated by gaps."""
+    return "l" + GROUP_GAP.join(["r" * width] * ngroups)
+
+
+def _group_rules(ngroups, width):
+    """Rules under the headers of groups of columns following a label
+    column."""
+    return "".join(f"\\cmidrule(lr){{{2 + i * width}-{1 + (i + 1) * width}}}"
+                   for i in range(ngroups))
+
+
+def _table_mmphf(tbl, args):
+    """Render the 'mmphf' table: sizes as column groups, each with constr/bpk/query."""
+    sizes = tbl["sizes"]
+    nsizes = len(sizes)
+    cols_per_size = 3  # construction, bits/key, query
+
+    colspec = _group_colspec(nsizes, cols_per_size)
+    print(r"\begin{tabular}{" + colspec + "}")
+    print(r"\toprule")
+
+    # Header row 1: size groups
+    hdr1 = ""
+    for n in sizes:
+        log2_n = n.bit_length() - 1
+        hdr1 += f" & \\multicolumn{{{cols_per_size}}}{{c}}{{$n = 2^{{{log2_n}}}$}}"
+    print(hdr1 + r" \\")
+    print(_group_rules(nsizes, cols_per_size))
+
+    # Header row 2: sub-column labels
+    sub_hdr = " & Constr. & Bits/key & Query" * nsizes
+    print(sub_hdr + r" \\")
+    print(r"\midrule")
+
+    # Data rows
+    for method_name, label in tbl["methods"]:
+        if method_name not in METHODS:
+            continue
+        cfg = METHODS[method_name]
+        rdir = Path(args.results_dir) / method_name
+        tool_for_parse = _parse_tool(cfg["tool"])
+
+        row = label
+        for n in sizes:
+            bench_err = rdir / f"bench.{n}.0.err"
+
+            constr_val = ""
+            bpk_val = ""
+            query_val = ""
+
+            if bench_err.exists():
+                text = bench_err.read_text()
+                bd = parse_build(text, tool_for_parse)
+                qd = parse_query(text, tool_for_parse)
+                v = bd.get("constr_ns")
+                if v is not None:
+                    constr_val = f"{v:.1f}"
+                v = qd.get("query_min")
+                if v is not None:
+                    query_val = f"{v:.1f}"
+                bpk = parse_bits_per_key(text, n)
+                if bpk is not None:
+                    bpk_val = f"{bpk:.2f}"
+
+            row += f" & {constr_val} & {bpk_val} & {query_val}"
+
+        row += r" \\"
+        print(row)
+
+    print(r"\bottomrule")
+    print(r"\end{tabular}")
+
+
+def _table_mmphf_str(tbl, args):
+    """Render the 'mmphf-str' table: datasets as column groups, constr/bpk/query each."""
+    import re
+    # Discover datasets from result directories.
+    datasets = set()
+    for method_name, _ in tbl["methods"]:
+        rdir = Path(args.results_dir) / method_name
+        if not rdir.exists():
+            continue
+        for f in rdir.iterdir():
+            m = re.match(r'bench\.(.+)\.0\.err$', f.name)
+            if m:
+                datasets.add(m.group(1))
+    # Sort datasets by number of keys (ascending) so columns go
+    # from smallest to largest.
+    def _dataset_n(d):
+        for method_name, _ in tbl["methods"]:
+            p = Path(args.results_dir) / method_name / f"bench.{d}.0.err"
+            if p.exists():
+                n = _parse_n_from_build(p.read_text())
+                if n:
+                    return n
+        return 0
+    datasets = sorted(datasets, key=_dataset_n)
+    if not datasets:
+        print("No string dataset results found.")
+        return
+
+    ndatasets = len(datasets)
+    cols_per_dataset = 3  # construction, bits/key, query
+
+    colspec = _group_colspec(ndatasets, cols_per_dataset)
+    print(r"\begin{tabular}{" + colspec + "}")
+    print(r"\toprule")
+
+    hdr1 = ""
+    for d in datasets:
+        safe = d.replace("_", r"\_")
+        hdr1 += f" & \\multicolumn{{{cols_per_dataset}}}{{c}}{{\\texttt{{{safe}}}}}"
+    print(hdr1 + r" \\")
+    print(_group_rules(ndatasets, cols_per_dataset))
+
+    sub_hdr = " & Constr. & Bits/key & Query" * ndatasets
+    print(sub_hdr + r" \\")
+    print(r"\midrule")
+
+    for method_name, label in tbl["methods"]:
+        if method_name not in METHODS:
+            continue
+        cfg = METHODS[method_name]
+        rdir = Path(args.results_dir) / method_name
+        tool_for_parse = _parse_tool(cfg["tool"])
+
+        row = label
+        for dataset in datasets:
+            bench_err = rdir / f"bench.{dataset}.0.err"
+
+            constr_val = ""
+            bpk_val = ""
+            query_val = ""
+
+            n = None
+            if bench_err.exists():
+                text = bench_err.read_text()
+                bd = parse_build(text, tool_for_parse)
+                qd = parse_query(text, tool_for_parse)
+                n = _parse_n_from_build(text)
+                v = bd.get("constr_ns")
+                if v is not None:
+                    constr_val = f"{v:.0f}"
+                v = qd.get("query_min")
+                if v is not None:
+                    query_val = f"{v:.0f}"
+                bpk = parse_bits_per_key(text, n)
+                if bpk is not None:
+                    bpk_val = f"{bpk:.2f}"
+
+            row += f" & {constr_val} & {bpk_val} & {query_val}"
+
+        row += r" \\"
+        print(row)
+
+    print(r"\bottomrule")
+    print(r"\end{tabular}")
+
+
+def _table_comp(tbl, args):
+    """Render the 'comp' table: distributions as column groups, constr/query each."""
+    dist_labels = tbl["dist_labels"]
+    ndists = len(dist_labels)
+
+    for i, n in enumerate(tbl["sizes"]):
+        log2_n = n.bit_length() - 1
+        if i > 0:
+            print()
+            print(r"\bigskip")
+            print()
+
+        colspec = _group_colspec(ndists, 3)
+        print(f"% n = 2^{{{log2_n}}}")
+        print(r"\begin{tabular}{" + colspec + "}")
+        print(r"\toprule")
+
+        hdr1 = "".join(f" & \\multicolumn{{3}}{{c}}{{{dl}}}" for dl in dist_labels)
+        print(hdr1 + r" \\")
+        print(_group_rules(ndists, 3))
+
+        sub_hdr = (" & Constr. & Bits/key & Query") * ndists
+        print(sub_hdr + r" \\")
+        print(r"\midrule")
+
+        for label, method_names in tbl["rows"]:
+            row = label
+            for method_name in method_names:
+                if method_name not in METHODS:
+                    row += " & & &"
+                    continue
+                cfg = METHODS[method_name]
+                rdir = Path(args.results_dir) / method_name
+                tool_for_parse = _parse_tool(cfg["tool"])
+
+                bench_err = rdir / f"bench.{n}.0.err"
+                constr_val = ""
+                bpk_val = ""
+                query_val = ""
+
+                if bench_err.exists():
+                    text = bench_err.read_text()
+                    bd = parse_build(text, tool_for_parse)
+                    qd = parse_query(text, tool_for_parse)
+                    v = bd.get("constr_ns")
+                    if v is not None:
+                        constr_val = f"{v:.1f}"
+                    v = qd.get("query_min")
+                    if v is not None:
+                        query_val = f"{v:.1f}"
+                    bpk = parse_bits_per_key(text, n)
+                    if bpk is not None:
+                        bpk_val = f"{bpk:.2f}"
+
+                row += f" & {constr_val} & {bpk_val} & {query_val}"
+
+            row += r" \\"
+            print(row)
+
+        print(r"\bottomrule")
+        print(r"\end{tabular}")
+
+
+def _table_java(tbl, args):
+    """Render the 'java' table: filter query + overhead comparison."""
+    bits_order = tbl["bits_order"]
+    even = [b for b in bits_order if b % 2 == 0]
+    odd = [b for b in bits_order if b % 2 != 0]
+    ncols = len(bits_order)
+    n_even = len(even)
+    n_odd = len(odd)
+    colspec = "l" + "r" * n_even + r"@{\hspace{10pt}}" + "r" * n_odd + GROUP_GAP + "r"
+
+    for i, n in enumerate(tbl["sizes"]):
+        log2_n = n.bit_length() - 1
+        if i > 0:
+            print()
+            print(r"\bigskip")
+            print()
+
+        print(f"% Java comparison, n = 2^{{{log2_n}}}")
+        print(r"\begin{tabular}{" + colspec + "}")
+        print(r"\toprule")
+
+        print(f"& \\multicolumn{{{ncols}}}{{c}}{{Query (ns/key)}}"
+              r" & {Overhead} \\")
+        print(f"\\cmidrule(lr){{2-{ncols + 1}}}")
+
+        hdr = ""
+        for bits in bits_order:
+            hdr += f" & {bits}"
+        hdr += " &"
+        print(hdr + r" \\")
+        print(r"\midrule")
+
+        for label, variants in tbl["rows"]:
+            method_name = variants["query"]
+            cfg = METHODS.get(method_name)
+            if cfg is None:
+                continue
+            rdir = Path(args.results_dir) / method_name
+            tool_for_parse = _parse_tool(cfg["tool"])
+
+            query_cells = ""
+            overheads = []
+            for bits in bits_order:
+                bench_err = rdir / f"bench.{n}.{bits}.err"
+
+                qval = ""
+                if bench_err.exists():
+                    text = bench_err.read_text()
+                    qd = parse_query(text, tool_for_parse)
+                    v = qd.get("query_min")
+                    if v is not None:
+                        qval = f"{v:.1f}"
+                    bpk = parse_bits_per_key(text, n)
+                    if bpk is not None:
+                        overheads.append(compute_overhead(bpk, bits))
+
+                query_cells += f" & {qval}"
+
+            if overheads:
+                avg_ovhd = sum(overheads) / len(overheads)
+                overhead_cell = f" & $\\approx {avg_ovhd:.1f}\\%$"
+            else:
+                overhead_cell = " &"
+
+            print(label + query_cells + overhead_cell + r" \\")
+
+        print(r"\bottomrule")
+        print(r"\end{tabular}")
+
+
+def _table_java_comp(tbl, args):
+    """Render the 'java-comp' table: compressed function comparison."""
+    dist_labels = tbl["dist_labels"]
+    ndists = len(dist_labels)
+
+    for i, n in enumerate(tbl["sizes"]):
+        log2_n = n.bit_length() - 1
+        if i > 0:
+            print()
+            print(r"\bigskip")
+            print()
+
+        colspec = _group_colspec(ndists, 3)
+        print(f"% Java compressed comparison, n = 2^{{{log2_n}}}")
+        print(r"\begin{tabular}{" + colspec + "}")
+        print(r"\toprule")
+
+        hdr1 = "".join(f" & \\multicolumn{{3}}{{c}}{{{dl}}}" for dl in dist_labels)
+        print(hdr1 + r" \\")
+        print(_group_rules(ndists, 3))
+
+        sub_hdr = (" & Bits/key & Ovhd\\% & Query") * ndists
+        print(sub_hdr + r" \\")
+        print(r"\midrule")
+
+        for label, method_names in tbl["rows"]:
+            row = label
+            for method_name in method_names:
+                if method_name not in METHODS:
+                    row += " & & &"
+                    continue
+                cfg = METHODS[method_name]
+                rdir = Path(args.results_dir) / method_name
+                tool_for_parse = _parse_tool(cfg["tool"])
+
+                bench_err = rdir / f"bench.{n}.0.err"
+                query_val = ""
+                bpk_val = ""
+                ovhd_val = ""
+
+                if bench_err.exists():
+                    text = bench_err.read_text()
+                    qd = parse_query(text, tool_for_parse)
+                    v = qd.get("query_min")
+                    if v is not None:
+                        query_val = f"{v:.1f}"
+                    bpk = parse_bits_per_key(text, n)
+                    if bpk is not None:
+                        bpk_val = f"{bpk:.2f}"
+                        dist = cfg.get("distribution")
+                        entropy = distribution_entropy(dist)
+                        if entropy is not None:
+                            ovhd_val = f"{compute_overhead(bpk, entropy):.1f}"
+
+                row += f" & {bpk_val} & {ovhd_val} & {query_val}"
+
+            row += r" \\"
+            print(row)
+
+        print(r"\bottomrule")
+        print(r"\end{tabular}")
+
+
+def cmd_table(args):
+    """Print LaTeX tables for the paper."""
+    if args.table not in TABLES:
+        sys.exit(f"Unknown table: {args.table}\n"
+                 f"Available: {', '.join(TABLES)}")
+
+    tbl = TABLES[args.table]
+
+    if args.table == "mmphf":
+        _table_mmphf(tbl, args)
+    elif args.table == "mmphf-str":
+        _table_mmphf_str(tbl, args)
+    elif args.table == "comp":
+        _table_comp(tbl, args)
+    elif args.table == "java":
+        _table_java(tbl, args)
+    elif args.table == "java-comp":
+        _table_java_comp(tbl, args)
+    else:
+        _table_filter(tbl, args)
+
+
+# =====================================================================
+#  CLI
+# =====================================================================
+
+
+def make_parser():
+    """Build the argument parser with all subcommands."""
+    p = argparse.ArgumentParser(
+        description="Benchmark runner for the ε-cost sharding paper.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # --- Global options ---
+    p.add_argument("--sux-dir", default=os.environ.get("SUX_DIR", os.path.join(REPO_ROOT, "sux-rs")),
+                   help="Path to sux-rs repository (default: sux-rs/ submodule)")
+    p.add_argument("--burr-dir", default=os.environ.get("BURR_DIR", os.path.join(REPO_ROOT, "BuRR")),
+                   help="Path to BuRR repository (default: BuRR/ submodule)")
+    p.add_argument("--results-dir", default=os.environ.get("RESULTS_DIR", "results"),
+                   help="Path to results directory")
+    p.add_argument("--vec-results-dir", default=None,
+                   help="Path to the results directory of a campaign with "
+                        "auto-vectorization enabled, used by plot for the "
+                        "methods listed in the \"vec_methods\" of a figure")
+    p.add_argument("--pin", default=os.environ.get("BENCH_PIN"),
+                   help="CPU-pinning prefix, e.g. 'taskset -c 2' (ignored by "
+                        "multi-bench)")
+    p.add_argument("--threads", type=int, default=None,
+                   help="Thread count for parallel builds (default: "
+                        f"{DEFAULT_THREADS}); single-threaded methods "
+                        "are not affected (ignored by multi-bench)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Print commands without executing")
+    p.add_argument("--force", action="store_true",
+                   help="Re-run even if result files already exist")
+
+    sub = p.add_subparsers(dest="command", required=True)
+
+    # Common arguments shared by multiple subcommands.
+    def add_common(sp):
+        sp.add_argument("--method", default="all",
+                        help="Method name(s), comma-separated, or 'all'")
+        sp.add_argument("--bits", default="all",
+                        help="Bit widths: 'all', 'even', 'odd', or comma-separated ints")
+        sp.add_argument("--max-log2", type=int, default=None,
+                        help=f"Tighten the per-method max_log2 cap (min: {MIN_LOG2}). "
+                             "If omitted, only the per-method cap in configs.py applies.")
+        # Allow global flags after the subcommand too.
+        sp.add_argument("--unaligned", action="store_true", default=False,
+                        help="Use unaligned storage (BitFieldVec) instead of aligned primitives")
+        sp.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
+        sp.add_argument("--force", action="store_true", default=argparse.SUPPRESS)
+        sp.add_argument("--pin", default=argparse.SUPPRESS)
+        sp.add_argument("--threads", type=int, default=argparse.SUPPRESS)
+
+    # --- bench ---
+    b = sub.add_parser("bench", help="Build structures, query, and clean up")
+    add_common(b)
+    b.add_argument("--keep-data", action="store_true", default=False,
+                   help="Keep serialized files after query (for debugging)")
+    b.add_argument("--no-keep-data", action="store_false", dest="keep_data",
+                   help="Delete serialized files after query (default)")
+
+    # --- multi-bench ---
+    mb = sub.add_parser("multi-bench",
+                        help="BuRR-style parallel queries on many structures",
+                        description="BuRR-style parallel queries on many "
+                                    "structures. The global --pin and "
+                                    "--threads are ignored: runs are never "
+                                    "pinned, and thread counts are set by "
+                                    "--build-threads and --query-threads.")
+    mb.add_argument("--method",
+                    default="FuseAug3Shards,FuseAug3Shards-novec,BuRR,VFunc,VFunc-novec,"
+                            "PHunc,PHuncBits,BuRRFunc",
+                    help="Method name(s), comma-separated, or 'all' "
+                         "(default: FuseAug3Shards,FuseAug3Shards-novec,BuRR,VFunc,"
+                         "VFunc-novec,PHunc,PHuncBits,BuRRFunc)")
+    mb.add_argument("--bits", default="all",
+                    help="Bit widths: 'all' (default), 'even', 'odd', or "
+                         "comma-separated ints")
+    mb.add_argument("--total-log2", type=int, default=MULTI_TOTAL_LOG2,
+                    help="Log2 of the total number of keys: each size n is "
+                         "tested on 2^total-log2 / n structures (default: "
+                         f"{MULTI_TOTAL_LOG2}; figures and tables use only "
+                         "this default)")
+    mb.add_argument("--min-log2", type=int, default=MIN_LOG2,
+                    help=f"Log2 of the smallest size (default: {MIN_LOG2})")
+    mb.add_argument("--max-log2", type=int, default=None,
+                    help="Log2 of the largest size (default: --total-log2)")
+    mb.add_argument("--keys", type=int, default=None,
+                    help="Test only --filters structures of this many keys "
+                         "(e.g., 10^7 and 1280, as in the BuRR paper)")
+    mb.add_argument("--filters", type=int, default=1280,
+                    help="Number of structures with --keys (default: 1280)")
+    mb.add_argument("--queries", type=int, default=QUERY_KEYS,
+                    help=f"Queries per thread (default: {QUERY_KEYS})")
+    mb.add_argument("--query-threads", default=str(os.cpu_count()),
+                    help="Comma-separated query thread counts "
+                         f"(default: {os.cpu_count()})")
+    mb.add_argument("--build-threads", type=int, default=os.cpu_count(),
+                    help=f"Construction threads (default: {os.cpu_count()})")
+    mb.add_argument("--burr-eps", choices=["bench", "parbench"],
+                    default="bench",
+                    help="BuRR overload ε: that of the bench binary used for"
+                         " all other BuRR results (-4/L for L > 32, default)"
+                         " or the default of parbench.cpp (-3/L)")
+    mb.add_argument("--report", action="store_true",
+                    help="Only print the TSV table of existing results")
+    mb.add_argument("--dry-run", action="store_true", default=argparse.SUPPRESS)
+    mb.add_argument("--force", action="store_true", default=argparse.SUPPRESS)
+
+    # --- report ---
+    r = sub.add_parser("report",
+                       help="Print a space-aligned report of results")
+    add_common(r)
+
+    # --- plot ---
+    pl = sub.add_parser("plot", help="Generate paper figures")
+    pl.add_argument("--figure", default="all",
+                    help=f"Figure preset, or 'all' (default): {', '.join(FIGURES)}")
+    pl.add_argument("--bits", default="all",
+                    help="Bit widths for figures")
+    pl.add_argument("--max-log2", type=int, default=None,
+                    help="Tighten the per-method max_log2 cap. "
+                         "If omitted, only the per-method cap in configs.py applies.")
+    pl.add_argument("--output-dir", default="figs",
+                    help="Output directory for PDFs (default: figs)")
+    pl.add_argument("--results-dir", default=argparse.SUPPRESS)
+
+    # --- table ---
+    tb = sub.add_parser("table", help="Print LaTeX tables")
+    tb.add_argument("--table", default="filter",
+                    help=f"Table preset (default: filter). Available: {', '.join(TABLES)}")
+    tb.add_argument("--results-dir", default=argparse.SUPPRESS)
+
+    # --- status ---
+    st = sub.add_parser("status", help="Show completed/pending benchmark runs")
+    add_common(st)
+
+    # --- clean ---
+    cl = sub.add_parser("clean", help="Delete results and/or serialized data")
+    cl.add_argument("--method", default="all",
+                    help="Method name(s), comma-separated, or 'all'")
+    cl.add_argument("--data-only", action="store_true",
+                    help="Only delete serialized structure files, keep .err results")
+
+    return p
+
+
+def main():
+    p = make_parser()
+    args = p.parse_args()
+
+    dispatch = {
+        "bench": cmd_bench,
+        "multi-bench": cmd_multi_bench,
+        "report": cmd_report,
+        "plot": cmd_plot,
+        "table": cmd_table,
+        "status": cmd_status,
+        "clean": cmd_clean,
+    }
+
+    dispatch[args.command](args)
+
+
+if __name__ == "__main__":
+    main()

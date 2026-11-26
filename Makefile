@@ -1,0 +1,84 @@
+# Makefile for the C++ benchmarks of the harness: the BuRR-VL + coding
+# benchmark (bench_csf) and the LeMonHash benchmarks on integers and strings
+# (bench_lemonhash, bench_lemonhash_str, built through CMakeLists.txt). The
+# init target initializes the submodules and applies the LeMonHash patches.
+# bench/run.py invokes these targets on demand; it builds the BuRR binaries
+# through BuRR's own Makefile, and all other binaries with cargo, the Maven
+# wrapper, or cc.
+#
+# bench_csf uses BuRR-VL headers from the BuRR-VL/ submodule and coding
+# headers from LearnedStaticFunction/include/.  The BuRR-VL library needs tlx
+# and ips2ra (pulled in as submodules of BuRR-VL/).
+
+CXX ?= c++
+
+BURR_VL = BuRR-VL
+LSF = LearnedStaticFunction
+
+INCLUDES = -I$(BURR_VL) \
+           -I$(BURR_VL)/tlx \
+           -isystem $(BURR_VL)/ips2ra/include \
+           -I$(BURR_VL)/DySECT \
+           -I$(LSF)/include
+
+CFLAGS = -std=c++20 -march=native -D_REENTRANT $(INCLUDES)
+
+# GCC 15+ miscompiles LeMonHash/SimpleRibbon at -O3 without -fno-strict-aliasing
+OPTFLAGS = -O3 -DNDEBUG -march=native -fPIE -fno-strict-aliasing
+
+LDFLAGS = $(BURR_VL)/sorter.o $(BURR_VL)/tlx/build/tlx/libtlx.a \
+          -lpthread -ltbb -latomic
+
+all: bench_csf bench_lemonhash bench_lemonhash_str
+
+# Initialize submodules without pulling LearnedStaticFunction's nested
+# tensorflow (4GB+).  Use this instead of git clone --recurse-submodules.
+init:
+	git submodule update --init --recursive BuRR BuRR-VL sux-rs
+	git submodule update --init Sux4J
+	git submodule update --init LearnedStaticFunction
+	git submodule update --init MMPHF-Experiments
+	cd MMPHF-Experiments && git -c url.https://github.com/.insteadOf=git@github.com: submodule update --init cpp/extlib/LeMonHash
+	cd MMPHF-Experiments/cpp/extlib/LeMonHash && git submodule update --init --recursive
+	# Fairness patch: switch LeMonHashVL public API to std::string_view so
+	# bench_lemonhash_str doesn't have to memcpy each query into a
+	# std::string inside the timed loop. --forward + || true makes
+	# re-running make init idempotent.
+	cd MMPHF-Experiments/cpp/extlib/LeMonHash && patch -p1 --forward < ../../../../lemonhash-vl-string-view.patch || true
+	cd MMPHF-Experiments/cpp/extlib/LeMonHash/extlib/util && patch -p1 --forward < ../../../../../../murmurhash-string-view.patch || true
+
+# BuRR-VL dependencies: sorter object and tlx library
+$(BURR_VL)/sorter.o: $(BURR_VL)/sorter.cpp $(BURR_VL)/sorter.hpp
+	$(CXX) $(OPTFLAGS) $(CFLAGS) -Wno-unused-function -c -o $@ $<
+
+$(BURR_VL)/tlx/build/tlx/libtlx.a:
+	@mkdir -p $(BURR_VL)/tlx/build
+	cd $(BURR_VL)/tlx/build && cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-g0 -fno-strict-aliasing" -G Ninja .. && ninja -j4
+
+bench_csf: $(BURR_VL)/sorter.o bench_csf.cpp $(BURR_VL)/tlx/build/tlx/libtlx.a
+	$(CXX) $(OPTFLAGS) $(CFLAGS) -o $@ bench_csf.cpp $(LDFLAGS)
+
+bench_lemonhash: bench_lemonhash.cpp
+	@mkdir -p build
+	cd build && cmake -DCMAKE_BUILD_TYPE=Release -G Ninja .. && ninja bench_lemonhash
+	cp build/bench_lemonhash $@
+
+bench_lemonhash_str: bench_lemonhash_str.cpp
+	@mkdir -p build
+	cd build && cmake -DCMAKE_BUILD_TYPE=Release -G Ninja .. && ninja bench_lemonhash_str
+	cp build/bench_lemonhash_str $@
+
+clean:
+	rm -f bench_csf bench_lemonhash bench_lemonhash_str $(BURR_VL)/sorter.o
+	rm -rf $(BURR_VL)/tlx/build build
+	rm -f BuRR/bench[0-9]* BuRR/benchpos[0-9]* BuRR/ribbon[0-9]* \
+	      BuRR/debug[0-9]* BuRR/parbench[0-9]* BuRR/parrun[0-9]* \
+	      BuRR/pardbg[0-9]* BuRR/sorter.o BuRR/tests
+	rm -rf BuRR/tlx/build
+	rm -f Sux4J/c/test_sf3_filter[0-9]* Sux4J/c/test_csf3_uint64
+	rm -rf java/target
+	cd sux-rs && cargo clean 2>/dev/null || true
+	cd hem-vfilter && cargo clean 2>/dev/null || true
+	cd multi-vfilter && cargo clean 2>/dev/null || true
+
+.PHONY: all init clean

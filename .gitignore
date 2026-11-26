@@ -1,0 +1,10 @@
+.cache
+data
+java/src/main/resources
+bench_csf
+bench_lemonhash
+bench_lemonhash_str
+results
+figs
+*.pdf
+build

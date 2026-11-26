@@ -1,0 +1,795 @@
+"""
+Benchmark configurations for the ε-cost sharding paper.
+
+This module defines the benchmark matrix: which methods to test, with what
+parameters, and how they map to paper figures.
+
+Each entry in METHODS specifies:
+  - tool: "sux" (VFilter/VFunc), "burr" (BuRR ribbon), "csf"
+    (BuRR-VL compressed static functions), "comp-vfunc" (sux-rs
+    CompVFunc), "mmphf" (monotone MMPHF, integer
+    keys), "mmphf-str" (monotone MMPHF, string keys), "lemonhash"
+    (LeMonHash, integer keys), "lemonhash-str" (LeMonHash, string
+    keys), "java" (Sux4J GOV3), "hem" (HEM-sharded VFilter, hem-vfilter/)
+
+  - How to build the structure and how to query it - Default size
+    ranges and special flags
+
+Bit widths for filters come in two families:
+  - "even" (8, 16, 32): power-of-2 widths, byte-aligned storage
+  - "odd" (9, 17, 33): non-power-of-2
+
+To add a new method add an entry to METHODS following the existing pattern.
+"""
+
+# --- Bit-width families ---
+
+EVEN_BITS = [8, 16, 32]
+ODD_BITS = [9, 17, 33]
+ALL_BITS = sorted(EVEN_BITS + ODD_BITS)
+
+# --- Global defaults ---
+
+# Starting size exponent: 2^20 ≈ 1M keys.
+MIN_LOG2 = 20
+
+# Default number of query operations per benchmark run.  The CSF methods
+# (BuRR-CSF) and LeMonHashStr override this via per-method "query_keys"
+# configs.
+QUERY_KEYS = 100_000_000
+
+import os
+
+# Default thread count for parallel construction.
+DEFAULT_THREADS = max(1, os.cpu_count() // 2)
+
+# Marker for the build_threads/burr_threads of methods whose construction is
+# parallel: it resolves to --threads if given, and to DEFAULT_THREADS
+# otherwise. Methods with a fixed count (e.g., the -seq variants, which measure
+# single-threaded construction) are not affected by --threads.
+PARALLEL = "parallel"
+
+SUX_FEATURES = "cli,mwhc,rayon,epserde,deko"
+
+# The Rust flags of the methods with "novec": the loop vectorizer of LLVM is
+# disabled, so that the queries of a benchmark loop are computed one at a
+# time, rather than several at a time with vector instructions (the SLP
+# vectorizer is still enabled). They are built in their own target
+# directories (see sux_target_dir in run.py). target-cpu=native must be
+# repeated, as RUSTFLAGS replaces the flags of .cargo/config.toml.
+NOVEC_RUSTFLAGS = "-C target-cpu=native -C llvm-args=-vectorize-loops=false"
+
+# Cargo profile used for benchmark builds.
+SUX_PROFILE = "bench"
+
+# Tool types whose results are bits-agnostic (bits/key is a result
+# metric, not a build parameter).  Used as the default when a method
+# does not set "bits_agnostic" explicitly.
+BITS_AGNOSTIC_TOOLS = frozenset({
+    "csf", "comp-vfunc", "mmphf", "lemonhash",
+})
+
+# --- Method definitions ---
+
+METHODS = {
+    # -----------------------------------------------------------------
+    # sux-rs VFilter methods
+    # -----------------------------------------------------------------
+    #
+    # All sux-rs methods:
+    #   build: vfilter -n <n> --shard-edge <E> --bits <b> [--unaligned] <outfile>
+    #   query: bench_vfilter <query_keys> <file> --shard-edge <E> --bits <b> [--unaligned]
+    #
+    # --unaligned is added only for odd (non-power-of-2) bit widths.
+    # For even bit widths (8, 16, 32) the backend is a Box<[u8/u16/u32]>
+    # which is inherently aligned, so --unaligned does not apply.
+    # --shard-edge selects the hypergraph construction variant.
+    #
+    # The shard_edge values use clap's kebab-case convention.
+    "Fuse3NoShards64": {
+        "tool": "sux",
+        "label": "Fuse(64)",
+        # Fuse 3-hypergraphs, no ε-cost sharding, 64-bit signatures.
+        # Fastest queries but limited scalability.
+        "shard_edge": "fuse3-no-shards64",
+        "build_bin": "vfilter",
+        "bench_bin": "bench_vfilter",
+        "build_threads": None,  # no sharding ⇒ single-threaded build
+        "max_log2": 31,  # u32 vertices: 2^32 keys need more than 2^32 vertices
+        "build_extra": ["--seed", "1"],
+    },
+    "Fuse3NoShards128": {
+        "tool": "sux",
+        "label": "Fuse(128)",
+        # Fuse 3-hypergraphs, no sharding, 128-bit signatures.
+        "shard_edge": "fuse3-no-shards128",
+        "build_bin": "vfilter",
+        "bench_bin": "bench_vfilter",
+        "build_threads": None,
+        "max_log2": 33,
+        # Even with --low-mem, 2^33 keys with 32- or 33-bit values exceed
+        # RAM on a 384 GiB machine.
+        "max_log2_by_bits": {32: 32, 33: 32},
+        # For n ≥ 2^32 the high-memory peeling algorithm exceeds RAM;
+        # --low-mem switches to a slower but leaner variant.
+        "low_mem_threshold": 32,
+    },
+    "FuseAug3Shards": {
+        "tool": "sux",
+        "label": "VFilter(Fuse+Aug)",
+        # Fuse + augmented peeling (for small shards) + ε-cost sharding.
+        # The paper's main contribution.
+        "shard_edge": "fuse-aug3-shards",
+        "build_bin": "vfilter",
+        "bench_bin": "bench_vfilter",
+        "build_threads": PARALLEL,
+        "max_log2": 33,
+    },
+    "FuseAug3Shards-seq": {
+        "tool": "sux",
+        "label": "VFilter(Fuse+Aug,seq)",
+        # Same structure, single-threaded build.
+        # Used only for construction-time comparison (no query benchmark).
+        "shard_edge": "fuse-aug3-shards",
+        "build_bin": "vfilter",
+        "bench_bin": "bench_vfilter",
+        "build_threads": 1,
+        "no_queries": True,
+        "max_log2": 33,
+    },
+    "FuseAug3FullSigs": {
+        "tool": "sux",
+        "label": "VFilter(Fuse+Aug,full)",
+        # Same structure, but shards are solved using the full 128-bit
+        # signatures instead of 64-bit local signatures, as functions must do
+        # beyond ten billion keys (shard_edge::MAX_LOCAL_SIG_FUNC_KEYS since
+        # sux 0.15.4). Not in the figures or tables, but the paper uses its
+        # results to state that full signatures make construction about 20%
+        # slower, and that queries cost the same.
+        "shard_edge": "fuse-aug3-full-sigs",
+        "build_bin": "vfilter",
+        "bench_bin": "bench_vfilter",
+        "build_threads": PARALLEL,
+        "max_log2": 33,
+    },
+    "Mwhc3": {
+        "tool": "sux",
+        "label": "VFilter(MWHC)",
+        # Classic MWHC 3-hypergraphs with ε-cost sharding.
+        "shard_edge": "mwhc3",
+        "build_bin": "vfilter",
+        "bench_bin": "bench_vfilter",
+        "build_threads": PARALLEL,
+        "max_log2": 33,
+        # MWHC uses a slightly larger epsilon to shard finely
+        "build_extra": ["--eps", "0.01"],
+    },
+    # -----------------------------------------------------------------
+    # HEM-sharded VFilter (the sharding ablation)
+    # -----------------------------------------------------------------
+    #
+    # Identical to FuseAug3Shards in every respect but the layout: same
+    # signatures, same shard selection, same fuse-graph edges, same expansion
+    # factor and segment-size law, same value backends, and by default the
+    # same number of shards. What differs is that shards keep their natural,
+    # unequal sizes, so their offsets have to be stored and loaded, and each
+    # shard carries a local seed. The gap against VFilter is therefore the
+    # cost of the offset/seed indirection alone. The exception is below
+    # 2·10⁷ keys, where VFilter solves its shards by augmented peeling, with
+    # an expansion factor that plain peeling cannot reach: there we use the
+    # expansion factor and segment-size law of plain peeling, which make the
+    # graphs 1.8–4.2% larger but do not change the work of a query. See
+    # hem-vfilter/src/lib.rs.
+    #
+    # Build:  hem_vfilter -n <n> --bits <b> <outfile>
+    # Query:  bench_hem_vfilter <query_keys> <outfile>
+    # The builder keeps all signatures in core (VFilter streams them through a
+    # disk-backed store), so it needs about 32 bytes per key while sharding.
+    # That fits 2^33 keys on a 384 GiB machine.
+    #
+    # This method appears in the query figures and in the filter table, but not
+    # in the construction figures: it has no augmented peeling and a plain
+    # peeling loop, so its build time would differ from VFilter's for reasons
+    # that have nothing to do with sharding.
+    "HemVFilter": {
+        "tool": "hem",
+        "label": "HEM(Fuse)",
+        "max_log2": 33,
+    },
+    # -----------------------------------------------------------------
+    # BuRR (Bumped Ribbon Retrieval) methods
+    # -----------------------------------------------------------------
+    #
+    # BuRR is a C++ project. The bit width is compiled into the binary
+    # (e.g. bench8, benchpos16, and parbench32, used by multi-bench).  All
+    # runs use:
+    #   -L 64   ribbon width 64
+    #   -2      two-bit threshold compression
+    #   -I      interleaved solution storage
+    #
+    # We use the 'bench' Makefile target (-O3 -DNDEBUG), not 'ribbon'
+    # (-O2, assertions enabled).
+    #
+    # Build:  bench<bits> -t <threads> -L 64 -2 -I -n <n>
+    # Query:  bench<bits> -t 1         -L 64 -2 -I -n <n> -r <file>
+    "BuRR": {
+        "tool": "burr",
+        "label": "BuRR",
+        "burr_binary": "bench",
+        "burr_flags": ["-L", "64", "-2", "-I"],
+        "burr_threads": PARALLEL,
+        "max_log2": 33,
+    },
+    # BuRR filter queries stop at the first fingerprint bit that does not
+    # match, so on negative queries (the Weyl sequence used for all
+    # filters) they are much cheaper than on keys, which must check all
+    # bits; positive queries do essentially the work of a BuRR static
+    # function. Same structure as BuRR, but queried on keys of the filter.
+    "BuRR-pos": {
+        "tool": "burr",
+        "label": "BuRR-pos",
+        # benchpos is ribbon.cpp compiled with -DRIBBON_POSITIVE_QUERIES
+        "burr_binary": "benchpos",
+        "burr_flags": ["-L", "64", "-2", "-I"],
+        "burr_threads": PARALLEL,
+        "max_log2": 33,
+        "style_as": "BuRR",
+        "linestyle": "--",
+    },
+    # Same structure as BuRR, queried as a static function on keys: the
+    # filter query without the comparison of each result bit with the
+    # fingerprint (InterleavedFunctionQuery).
+    "BuRR-func": {
+        "tool": "burr",
+        "label": "BuRR-func",
+        # benchfunc is ribbon.cpp compiled with -DRIBBON_FUNCTION_QUERIES
+        "burr_binary": "benchfunc",
+        "burr_flags": ["-L", "64", "-2", "-I"],
+        "burr_threads": PARALLEL,
+        "max_log2": 33,
+        "style_as": "BuRR",
+        "linestyle": ":",
+    },
+    "BuRRFunc": {
+        "tool": "burr",
+        "label": "BuRR",
+        # A BuRR static function (retrieval data structure, BuRR with
+        # kIsFilter = false), not a filter: key i is mapped to i using
+        # ⌈lg n⌉ bits, as for VFunc and PHunc in the phast-* figures.
+        # benchretr<w> is ribbon.cpp compiled with -DRIBBON_RETRIEVAL and
+        # RIBBON_BITS=w, where w = ⌈lg n⌉ (see "index_values"); queries on
+        # keys compute the value without comparing it, as BuRR-func does.
+        # multi-bench uses parbenchretr<w>, with positive queries only.
+        "burr_binary": "benchretr",
+        "multi_binary": "parbenchretr",
+        "burr_flags": ["-L", "64", "-2", "-I"],
+        "burr_threads": PARALLEL,
+        "bits_agnostic": True,
+        "index_values": True,
+        # With 2^33 keys, both the single construction and the parallel
+        # test run out of memory on a 384 GiB machine (killed at 390 GB
+        # resident): the input and its copy of hashes are key-value pairs
+        "max_log2": 32,
+        # Unpinned queries, as for VFunc and PHunc
+        "pin_query": False,
+    },
+    "BuRR-seq": {
+        "tool": "burr",
+        "label": "BuRR(seq)",
+        "burr_binary": "bench",
+        "burr_flags": ["-L", "64", "-2", "-I"],
+        "burr_threads": 1,
+        "no_queries": True,
+        "max_log2": 33,
+    },
+    # -----------------------------------------------------------------
+    # CSF (Compressed Static Functions via BuRR-VL)
+    # -----------------------------------------------------------------
+    #
+    # bench_csf builds two BuRR-VL ribbons (filter + correction) with a
+    # prefix-free code.  Bits-agnostic (bits/key is a result metric).
+    #
+    # Build:  bench_csf -n <n> --geometric --coder huffman -Q -w <file>
+    # Query:  bench_csf -n <n> --coder huffman --queries <query_keys> -r <file>
+    "CSF-Geo": {
+        "tool": "csf",
+        "label": "BuRR-CSF(geo)",
+        "distribution": ["--geometric"],
+        "coder": "huffman",
+        "max_log2": 31,
+        "query_keys": 20_000_000,
+    },
+    "CSF-Zipf": {
+        "tool": "csf",
+        "label": "BuRR-CSF(zipf)",
+        "distribution": ["--zipf", "2000"],
+        "coder": "huffman",
+        # 2^31 keys exceed RAM on a 384 GiB machine (with the geometric
+        # distribution they do not).
+        "max_log2": 30,
+        "query_keys": 20_000_000,
+    },
+    "CSF-Uni256": {
+        "tool": "csf",
+        "label": "BuRR-CSF(uni256)",
+        "distribution": ["--uniform", "256"],
+        "coder": "huffman",
+        # 2^31 keys exceed RAM on a 384 GiB machine.
+        "max_log2": 30,
+        "query_keys": 20_000_000,
+    },
+    # -----------------------------------------------------------------
+    # sux-rs CompVFunc (compressed static functions)
+    # -----------------------------------------------------------------
+    #
+    # Build with comp_vfunc, query with
+    # bench_comp_vfunc.  Bits-agnostic (bits/key is a result metric).
+    # Uses bits=0 sentinel.
+    #
+    # Build:  comp_vfunc -n <n> --geometric --shard-edge fuse3-shards
+    #             --huffman-entropy-threshold 1 --threads 1 <outfile>
+    # Query:  bench_comp_vfunc <query_keys> <outfile> --shard-edge fuse3-shards
+    "CompVFunc-Geo": {
+        "tool": "comp-vfunc",
+        "label": "CompVFunc(geo)",
+        "distribution": ["--geometric"],
+        "shard_edge": "fuse3-shards",
+        "build_threads": 1,
+        "max_log2": 31,
+    },
+    "CompVFunc-Zipf": {
+        "tool": "comp-vfunc",
+        "label": "CompVFunc(zipf)",
+        "distribution": ["--zipf", "2000"],
+        "shard_edge": "fuse3-shards",
+        "build_threads": 1,
+        "max_log2": 31,
+    },
+    "CompVFunc-Uni256": {
+        "tool": "comp-vfunc",
+        "label": "CompVFunc(uni256)",
+        "distribution": ["--uniform", "256"],
+        "shard_edge": "fuse3-shards",
+        "build_threads": 1,
+        "max_log2": 31,
+    },
+    # -----------------------------------------------------------------
+    # sux-rs VFunc (list index functions / minimal perfect hash)
+    # -----------------------------------------------------------------
+    #
+    # Same two-step pattern as VFilter:
+    #   Build: vfunc -n <n> --shard-edge <E> [--threads T] <outfile>
+    #   Query: bench_vfunc <query_keys> <outfile> --shard-edge <E>
+    #
+    # VFunc maps keys to their rank [0..n), so bits/key is a result
+    # metric (bits-agnostic).
+    "VFunc": {
+        "tool": "sux",
+        "label": "VFunc(Fuse+Aug)",
+        "shard_edge": "fuse-aug3-shards",
+        "build_bin": "vfunc",
+        "bench_bin": "bench_vfunc",
+        "bits_agnostic": True,
+        "build_threads": PARALLEL,
+        "max_log2": 33,
+        # Compared against PHunc. Its predecessor (PHastR + array) built and
+        # queried in one process, which could not be pinned, so VFunc queries
+        # were run unpinned too; we keep both unpinned, for consistency with
+        # the existing results.
+        "pin_query": False,
+    },
+    "VFuncFullSigs": {
+        "tool": "sux",
+        "label": "VFunc(Fuse+Aug,full)",
+        # Same as VFunc, but with full signatures (see FuseAug3FullSigs).
+        # Not in the figures or tables, but the paper uses its results to
+        # state that full signatures make construction about 10% slower, and
+        # that queries cost the same. Unpinned queries, as for VFunc.
+        "shard_edge": "fuse-aug3-full-sigs",
+        "build_bin": "vfunc",
+        "bench_bin": "bench_vfunc",
+        "bits_agnostic": True,
+        "build_threads": PARALLEL,
+        # At 2^33 keys full signatures halve the number of shards, so the
+        # 32 graphs being peeled double in size, and the in-memory build
+        # exceeds RAM on a 384 GiB machine (VFunc itself peaks at 344 GB)
+        "max_log2": 32,
+        "pin_query": False,
+    },
+    # -----------------------------------------------------------------
+    # PHunc (minimal perfect hash function + array of values)
+    # -----------------------------------------------------------------
+    #
+    # PHunc, from sux-rs, is a PHastR minimal perfect hash function with an
+    # array of values. It is built with phunc and queried with bench_phunc,
+    # as VFunc is with vfunc and bench_vfunc; values are always read
+    # unaligned (which matters for bit-field vectors and for the PHastR).
+    #
+    # PHunc maps each key to its index, as VFunc does, and it is
+    # bits-agnostic (bits/key is a result metric):
+    #   Build:  phunc -n <n> --unaligned --threads <t> <outfile>
+    #   Query:  bench_phunc <query_keys> <outfile> --unaligned
+    #
+    # PHuncBits maps each key to a pseudorandom value of the given number of
+    # bits, as the filters do (8, 16, and 32 bits use a boxed slice, other
+    # widths a bit-field vector):
+    #   Build:  phunc -n <n> --bits <b> --unaligned --threads <t> <outfile>
+    #   Query:  bench_phunc <query_keys> <outfile> --bits <b> --unaligned
+    "PHunc": {
+        "tool": "sux",
+        "label": "PHunc",
+        "build_bin": "phunc",
+        "bench_bin": "bench_phunc",
+        "bits_agnostic": True,
+        "unaligned": True,
+        "build_threads": PARALLEL,
+        "max_log2": 33,
+        # Unpinned queries, as for VFunc
+        "pin_query": False,
+    },
+    "PHuncBits": {
+        "tool": "sux",
+        "label": "PHunc",
+        "build_bin": "phunc",
+        "bench_bin": "bench_phunc",
+        "unaligned": True,
+        "build_threads": PARALLEL,
+        "max_log2": 33,
+    },
+    "PHuncBits-seq": {
+        "tool": "sux",
+        "label": "PHunc(seq)",
+        # Same structure, single-threaded build.
+        # Used only for construction-time comparison (no query benchmark).
+        "build_bin": "phunc",
+        "bench_bin": "bench_phunc",
+        "unaligned": True,
+        "build_threads": 1,
+        "no_queries": True,
+        "max_log2": 33,
+    },
+    # -----------------------------------------------------------------
+    # Monotone MMPHF methods (integer keys)
+    # -----------------------------------------------------------------
+    #
+    # All use sorted random 64-bit keys (same generation algorithm).
+    # Bits-agnostic (bits/key is a result metric).
+    #
+    # LcpMmphf/Lcp2Mmphf: built with lcp_mmphf and queried with
+    # bench_lcp_mmphf, both from sux-rs (-2 selects Lcp2Mmphf).
+    #   Build:  lcp_mmphf -n <n> [--unaligned] --threads 1 [-2] <outfile>
+    #   Query:  bench_lcp_mmphf <query_keys> <outfile> [--unaligned] [-2]
+    #               --repeats 5
+    #
+    # LeMonHash: uses bench_lemonhash (C++, cmake-built).
+    #   Run:  bench_lemonhash <n> <query_keys> <repeats>
+    "LcpMmphfInt": {
+        "tool": "mmphf",
+        "label": "LcpMmphf(int)",
+        "variant": "lcp",
+        "build_threads": 1,
+        "max_log2": 33,
+    },
+    "Lcp2MmphfInt": {
+        "tool": "mmphf",
+        "label": "Lcp2Mmphf(int)",
+        "variant": "lcp2",
+        "build_threads": 1,
+        "max_log2": 33,
+    },
+    "LeMonHashInt": {
+        "tool": "lemonhash",
+        "label": "LeMonHash(int)",
+        "max_log2": 33,
+    },
+    # -----------------------------------------------------------------
+    # Monotone MMPHF methods (string keys from data/ directory)
+    # -----------------------------------------------------------------
+    #
+    # These iterate over sorted string datasets in the data/ directory
+    # instead of using generated integer keys.  Skipped if data/ is
+    # absent or empty.
+    #
+    # LcpMmphfStr/Lcp2MmphfStr: build with lcp_mmphf -f, query with
+    #   bench_lcp_mmphf -f.
+    #
+    # LeMonHashStr: uses bench_lemonhash_str (C++, cmake-built).
+    #   Run:  bench_lemonhash_str <file> <query_keys> <repeats>
+    "LcpMmphfStr": {
+        "tool": "mmphf-str",
+        "label": "LcpMmphf(str)",
+        "variant": "lcp",
+        "build_threads": 1,
+    },
+    "Lcp2MmphfStr": {
+        "tool": "mmphf-str",
+        "label": "Lcp2Mmphf(str)",
+        "variant": "lcp2",
+        "build_threads": 1,
+    },
+    "LeMonHashStr": {
+        "tool": "lemonhash-str",
+        "label": "LeMonHash(str)",
+        "query_keys": 20_000_000,
+    },
+    # -----------------------------------------------------------------
+    # Sux4J GOV3 methods (Java build + C query)
+    # -----------------------------------------------------------------
+    #
+    # Build: Java BenchBuilder creates GOV3Function/GV3CompressedFunction
+    #        with LE-encoded uint64 keys, dumps C-binary.
+    # Query: C test harness (sf3/csf3) loads dump, benchmarks queries.
+    # Also the HEM baseline for the paper: GOV3 shards with the Heuristic
+    # External Memory scheme of Botelho, Pagh and Ziviani, so a query must
+    # load an offset and a local seed before it can generate its edge. That
+    # is the indirection epsilon-cost sharding removes. Queries run through
+    # the C code distributed with Sux4J, so the comparison with the Rust
+    # implementations is not affected by the language.
+    "GOV3Function": {
+        "tool": "java",
+        # No figure uses this label: the filter table labels the method
+        # HEM(GOV3), as the paper does, and the java table GOV3.
+        "label": "HEM/GOV3 (Sux4J)",
+        "java_type": "GOV3Function",
+        "sizes": [1 << 20, 1 << 30],
+    },
+    "GV3CompressedFunction-Geo": {
+        "tool": "java",
+        "label": "GOV3Comp(geo)",
+        "java_type": "GV3CompressedFunction",
+        "distribution": ["--geometric"],
+        "bits_agnostic": True,
+        "sizes": [1 << 20, 1 << 28],
+    },
+    "GV3CompressedFunction-Zipf": {
+        "tool": "java",
+        "label": "GOV3Comp(zipf)",
+        "java_type": "GV3CompressedFunction",
+        "distribution": ["--zipf", "2000"],
+        "bits_agnostic": True,
+        "sizes": [1 << 20, 1 << 28],
+    },
+    "GV3CompressedFunction-Uni256": {
+        "tool": "java",
+        "label": "GOV3Comp(uni256)",
+        "java_type": "GV3CompressedFunction",
+        "distribution": ["--uniform", "256"],
+        "bits_agnostic": True,
+        "sizes": [1 << 20, 1 << 28],
+    },
+}
+
+
+# -----------------------------------------------------------------
+# Figure presets
+# -----------------------------------------------------------------
+#
+# Each entry maps a figure name to the methods and data column it
+# should plot.
+#
+# The "bits" axis is handled at plot time: one PDF per bit width.
+# For "even" figures use bits in EVEN_BITS; for "odd" use ODD_BITS.
+#
+# Optional keys:
+#   "series_bits": plot each method once for each of these bit widths, in
+#                  a single PDF, rather than one PDF per bit width;
+#   "labels":      labels replacing those of METHODS;
+#   "y_group":     presets with the same group share the range of the
+#                  vertical axis (by default, each preset is its own group);
+#   "style_group": presets with the same group draw each method with the
+#                  same color and marker, given by its position in the
+#                  list of all methods of the group, in order of first
+#                  appearance (by default, each preset is its own group);
+#                  presets of a group with "series_bits" must have the same
+#                  number of bit widths;
+#   "legend_loc":  location of the legend (by default, the one set by
+#                  matplotlibrc, that is, the best one for each plot);
+#   "legend_ncol": number of columns of the legend (by default, one);
+#   "ymax_factor": ratio between the upper limit of the vertical axis and
+#                  the largest value (by default, 1.15).
+
+# Methods built with the loop vectorizer disabled (see NOVEC_RUSTFLAGS): the
+# same as the methods they are derived from, drawn with the same style but
+# dashed. Only the query times of these methods appear in the figures.
+for _base, _label in (("FuseAug3Shards", "VFilter(Fuse+Aug)-novec"),
+                      ("VFunc", "VFunc(Fuse+Aug)-novec"),
+                      ("LcpMmphfInt", "LcpMmphf(int)-novec"),
+                      ("HemVFilter", "HEM(Fuse)-novec"),
+                      ("Lcp2MmphfInt", "Lcp2Mmphf(int)-novec")):
+    METHODS[f"{_base}-novec"] = {
+        **METHODS[_base],
+        "label": _label,
+        "novec": True,
+        "style_as": _base,
+        "linestyle": "--",
+    }
+
+# The first methods of a style group, in order: they keep their styles when
+# new methods are added to the presets of the group (the other methods
+# follow, in order of first appearance). Methods with "style_as" must not be
+# listed, as they take no style of their own.
+STYLE_ORDER = {
+    "filter": [
+        "Fuse3NoShards64", "Fuse3NoShards128", "FuseAug3Shards", "Mwhc3",
+        "BuRR", "FuseAug3Shards-seq", "BuRR-seq", "HemVFilter",
+    ],
+}
+
+FIGURES = {
+    # --- Filters: per bit width ---
+    # One PDF per bit width: filter-build-8.pdf, filter-query-32.pdf, etc.
+    "filter-build": {
+        "title": "Filter Construction ({bits} bits)",
+        "style_group": "filter",
+        "legend_loc": "upper left",
+        "methods": [
+            "Fuse3NoShards64",
+            "Fuse3NoShards128",
+            "FuseAug3Shards",
+            "Mwhc3",
+            "BuRR",
+            "FuseAug3Shards-seq",
+            "BuRR-seq",
+            "PHuncBits",
+            "PHuncBits-seq",
+        ],
+        "column": "constr_ns",
+        "ylabel": "ns/key",
+    },
+    "filter-query": {
+        "title": "Filter Queries ({bits} bits)",
+        "style_group": "filter",
+        "legend_loc": "upper left",
+        # BuRR queries are drawn on negatives and on keys (BuRR-pos); BuRR-func
+        # (on keys as a static function, without the comparisons) is measured
+        # but not drawn, as it takes the same time as BuRR-pos
+        "labels": {"BuRR": "BuRR-neg"},
+        "methods": [
+            "Fuse3NoShards64",
+            "Fuse3NoShards128",
+            "FuseAug3Shards",
+            "HemVFilter",
+            "Mwhc3",
+            "BuRR",
+            "BuRR-pos",
+            "PHuncBits",
+            "FuseAug3Shards-novec",
+            "HemVFilter-novec",
+        ],
+        # Methods drawn again, dashed, from the results of --vec-results-dir
+        # (a campaign with auto-vectorization enabled)
+        "vec_methods": {"FuseAug3Shards": "VFilter(Fuse+Aug)-vec"},
+        "column": "query_min",
+        "ylabel": "ns/key",
+    },
+    # BuRR-style parallel queries (multi-bench): 2^33 / n structures of n
+    # keys, queried at random by all threads; a series for negative
+    # queries, and a dashed one for positive queries
+    "filter-multiquery": {
+        "title": "Filter Parallel Queries ({bits} bits)",
+        "style_group": "filter",
+        "legend_loc": "upper left",
+        "labels": {"FuseAug3Shards": "VFilter",
+                   "FuseAug3Shards-novec": "VFilter-novec"},
+        "methods": [
+            "FuseAug3Shards",
+            "BuRR",
+            "PHuncBits",
+            "FuseAug3Shards-novec",
+        ],
+        "columns": [("multi_neg", "-neg", "-"), ("multi_pos", "-pos", "--")],
+        # VFilter and PHunc cost the same on keys and non-keys, so they get
+        # a single line of non-keys, as in the other query figures
+        "method_columns": {"FuseAug3Shards": [("multi_neg", "", "-")],
+                           "PHuncBits": [("multi_neg", "", "-")],
+                           "FuseAug3Shards-novec": [("multi_neg", "", "--")]},
+        # Drawn again, dashed, from the results of --vec-results-dir
+        "vec_methods": {"FuseAug3Shards": "VFilter-vec"},
+        "ylabel": "ns/key",
+        # Room for the legend above the flat BuRR-pos lines
+        "ymax_factor": 1.5,
+    },
+    # --- Sharded vs unsharded sequential construction ---
+    # One PDF per family of bit widths, with a series for each method and
+    # width: sharding-even.pdf, sharding-odd.pdf.
+    "sharding-even": {
+        "title": "Sequential Construction (8, 16, 32 bits)",
+        "style_group": "sharding",
+        # Nine series: the legend needs room above the lines
+        "legend_loc": "upper left",
+        "legend_ncol": 2,
+        "ymax_factor": 1.5,
+        "methods": ["FuseAug3Shards-seq", "Fuse3NoShards128", "Fuse3NoShards64"],
+        "series_bits": EVEN_BITS,
+        "labels": {"FuseAug3Shards-seq": "VFilter(Fuse+Aug)"},
+        "y_group": "sharding",
+        "column": "constr_ns",
+        "ylabel": "ns/key",
+    },
+    "sharding-odd": {
+        "title": "Sequential Construction (9, 17, 33 bits)",
+        "style_group": "sharding",
+        # Nine series: the legend needs room above the lines
+        "legend_loc": "upper left",
+        "legend_ncol": 2,
+        "ymax_factor": 1.5,
+        "methods": ["FuseAug3Shards-seq", "Fuse3NoShards128", "Fuse3NoShards64"],
+        "series_bits": ODD_BITS,
+        "labels": {"FuseAug3Shards-seq": "VFilter(Fuse+Aug)"},
+        "y_group": "sharding",
+        "column": "constr_ns",
+        "ylabel": "ns/key",
+    },
+    # --- Compressed static functions: all distributions on one plot ---
+    # Bits-agnostic (auto-detected): comp-build.pdf, comp-query.pdf.
+    "comp-build": {
+        "title": "Compressed Function Construction",
+        "style_group": "comp",
+        # The lines leave no room for the legend: make room above them
+        "legend_loc": "upper left",
+        "legend_ncol": 2,
+        "ymax_factor": 1.5,
+        "methods": [
+            "CSF-Geo", "CSF-Zipf", "CSF-Uni256",
+            "CompVFunc-Geo", "CompVFunc-Zipf", "CompVFunc-Uni256",
+        ],
+        "column": "constr_ns",
+        "ylabel": "ns/key",
+    },
+    "comp-query": {
+        "title": "Compressed Function Queries",
+        "style_group": "comp",
+        "legend_ncol": 2,
+        "methods": [
+            "CSF-Geo", "CSF-Zipf", "CSF-Uni256",
+            "CompVFunc-Geo", "CompVFunc-Zipf", "CompVFunc-Uni256",
+        ],
+        "column": "query_min",
+        "ylabel": "ns/key",
+    },
+    # --- PHunc comparison: no bit width suffix ---
+    # Bits-agnostic: phast-build.pdf, phast-query.pdf.
+    "phast-build": {
+        "title": "Index Function Construction",
+        "style_group": "phast",
+        "methods": ["PHunc", "VFunc", "BuRRFunc"],
+        "column": "constr_ns",
+        "ylabel": "ns/key",
+    },
+    "phast-query": {
+        "title": "Index Function Queries",
+        "style_group": "phast",
+        "methods": ["PHunc", "VFunc", "BuRRFunc", "VFunc-novec"],
+        # VFunc drawn again, dashed, from the results of --vec-results-dir
+        "vec_methods": {"VFunc": "VFunc(Fuse+Aug)-vec"},
+        "column": "query_min",
+        "ylabel": "ns/key",
+    },
+    # BuRR-style parallel queries (multi-bench) of the static functions:
+    # 2^33 / n functions of n keys, queried at random by all threads
+    "phast-multiquery": {
+        "title": "Index Function Parallel Queries",
+        "style_group": "phast",
+        "methods": ["PHunc", "VFunc", "BuRRFunc", "VFunc-novec"],
+        "vec_methods": {"VFunc": "VFunc(Fuse+Aug)-vec"},
+        "column": "multi_pos",
+        "ylabel": "ns/key",
+    },
+    # --- Monotone MMPHF comparison (integer keys) ---
+    # Bits-agnostic: mmphf-build.pdf, mmphf-query.pdf.
+    "mmphf-build": {
+        "title": "Monotone MMPHF Construction",
+        "style_group": "mmphf",
+        "methods": ["LcpMmphfInt", "Lcp2MmphfInt", "LeMonHashInt"],
+        "column": "constr_ns",
+        "ylabel": "ns/key",
+    },
+    "mmphf-query": {
+        "title": "Monotone MMPHF Queries",
+        "style_group": "mmphf",
+        "methods": ["LcpMmphfInt", "Lcp2MmphfInt", "LeMonHashInt",
+                    "LcpMmphfInt-novec", "Lcp2MmphfInt-novec"],
+        "column": "query_min",
+        "ylabel": "ns/key",
+    },
+}
